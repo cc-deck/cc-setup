@@ -1,5 +1,5 @@
-cc-setup
-cc-setup-*
+/cc-setup
+/cc-setup-*
 mcp-setup
 dist/
 .claude/settings.json

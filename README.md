@@ -1,6 +1,16 @@
 # cc-setup
 
-Interactive CLI to manage which MCP servers are active per project in [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Define all your servers once in a central config, then cherry-pick which ones to enable for each project. This keeps Claude's context clean by loading only the tools you actually need.
+Interactive CLI to manage which MCP servers and plugins are active per project in [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+
+![cc-setup server management](docs/cc-setup-screenshot.png)
+
+## Why this matters
+
+Every MCP server you enable adds its tools to Claude's context. Every plugin adds its skills. When Claude sees dozens of tools and skills, two things happen: the context window fills up with tool descriptions instead of your actual conversation, and tool selection gets noisier because the model has to pick from a larger set of candidates.
+
+The practical effect is real. An MCP server with 20 tools that you only need in one project still consumes context in every other project. Skills from plugins you forgot you enabled compete with the ones you actually want triggered. The model does its best, but giving it a focused toolset for each project produces better results than dumping everything in globally.
+
+`cc-setup` solves this by letting you define all your servers and plugins once in a central registry, then selectively enable only the ones each project needs. A Kubernetes project gets your cluster tools. A documentation project gets your writing tools. Nothing more.
 
 ## Features
 
