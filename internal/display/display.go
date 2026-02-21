@@ -54,6 +54,7 @@ func MaskToken(token string, visible int) string {
 }
 
 // DecodeAuth decodes auth from existing headers and returns (typeLabel, displayString).
+// For OAuth-aware display that checks stored credentials, use DecodeAuthForServer.
 func DecodeAuth(headers map[string]any) (string, string) {
 	if headers == nil {
 		return "none", "no auth"
@@ -86,6 +87,35 @@ func DecodeAuth(headers map[string]any) (string, string) {
 	}
 
 	return "unknown", "auth configured"
+}
+
+// DecodeAuthForServer is like DecodeAuth but also checks for OAuth credentials
+// stored by Claude Code when no static Authorization header is configured.
+func DecodeAuthForServer(serverName string, serverDef map[string]any) (string, string) {
+	headers := serverHeaders(serverDef)
+	typeLabel, displayStr := DecodeAuth(headers)
+	if typeLabel != "none" {
+		return typeLabel, displayStr
+	}
+
+	// Only HTTP/SSE servers can use OAuth
+	stype, _ := serverDef["type"].(string)
+	if stype == "stdio" {
+		return typeLabel, displayStr
+	}
+
+	// Check for stored OAuth credentials
+	creds, err := config.LoadOAuthCredentials()
+	if err != nil || len(creds) == 0 {
+		return typeLabel, displayStr
+	}
+
+	serverURL, _ := serverDef["url"].(string)
+	if key := config.FindCredentialKey(creds, serverName, serverURL); key != "" {
+		return "oauth", "oauth"
+	}
+
+	return typeLabel, displayStr
 }
 
 // ServerEndpoint returns a short display string for the server's endpoint.
@@ -130,7 +160,7 @@ func RenderServerTable(servers config.ServerMap, showDescription bool) string {
 			stype = "?"
 		}
 		endpoint := ServerEndpoint(info)
-		_, authLabel := DecodeAuth(serverHeaders(info))
+		_, authLabel := DecodeAuthForServer(name, info)
 		desc, _ := info["description"].(string)
 
 		row := []string{name, stype, endpoint, authLabel}
@@ -170,7 +200,7 @@ func RenderActionTable(servers config.ServerMap, selected, toRemove []string) st
 	for _, name := range selected {
 		info := servers[name]
 		endpoint := ServerEndpoint(info)
-		_, authLabel := DecodeAuth(serverHeaders(info))
+		_, authLabel := DecodeAuthForServer(name, info)
 		rows = append(rows, []string{name, "add/update", endpoint, authLabel})
 	}
 
