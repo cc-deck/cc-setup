@@ -1,0 +1,50 @@
+version: 2
+
+builds:
+  - binary: cc-setup
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    name_template: "cc-setup-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+brews:
+  - repository:
+      owner: rhuss
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/rhuss/cc-setup
+    description: Interactive CLI to manage MCP servers for Claude Code
+    license: Apache-2.0
+    install: |
+      bin.install "cc-setup"
+    test: |
+      system "#{bin}/cc-setup", "version"
+
+release:
+  prerelease: auto
