@@ -62,7 +62,7 @@ func buildServerItems(servers config.ServerMap) []list.Item {
 			stype = "?"
 		}
 		endpoint := display.ServerEndpoint(info)
-		_, authLabel := display.DecodeAuth(serverHeaders(info))
+		_, authLabel := display.DecodeAuthForServer(name, info)
 		desc, _ := info["description"].(string)
 
 		parts := []string{stype}
