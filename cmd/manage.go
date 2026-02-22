@@ -407,9 +407,9 @@ func newManageModel(servers config.ServerMap, scope string, checked map[string]b
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 
-	// Short help: toggle, add, edit, delete, save, import, tab
+	// Short help: toggle, add, edit, delete, save, import, tab, scope toggle
 	l.AdditionalShortHelpKeys = func() []key.Binding {
-		return []key.Binding{keys.Toggle, keys.Add, keys.Edit, keys.Delete, keys.Save, keys.Import, tabKey}
+		return []key.Binding{keys.Toggle, keys.Add, keys.Edit, keys.Delete, keys.Save, keys.Import, tabKey, keys.ScopeToggle}
 	}
 	// Full help adds: scope keys
 	l.AdditionalFullHelpKeys = func() []key.Binding {
