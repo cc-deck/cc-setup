@@ -19,6 +19,7 @@ The practical effect is real. An MCP server with 20 tools that you only need in 
 - **Tool permissions management** to control which tools are auto-approved per server
 - **OAuth credential reuse** from Claude Code's stored tokens, with automatic refresh
 - **Dual scope support** for project-local (`.mcp.json`) and user-global (`~/.claude.json`) configs
+- **Plugin enable/disable** per project, for plugins installed by Claude Code
 - **Import from existing configs** to bootstrap the central registry from what you already have
 - All three MCP transport types: HTTP (streamable), SSE, and stdio
 
@@ -137,6 +138,8 @@ Opens a full-screen TUI with all your registered servers. Each server shows a he
 | `i` | Import servers from Claude config |
 | `p` | Switch to project scope |
 | `u` | Switch to user scope |
+| `.` | Toggle between project/user scope |
+| `tab` | Switch between MCP Servers and Plugins tabs |
 | `/` | Filter servers |
 | `q` / `esc` | Quit |
 
@@ -195,6 +198,22 @@ This reads from your project `.mcp.json`, user `~/.claude.json`, or both, and me
 ```bash
 cc-setup version
 ```
+
+## Plugin management
+
+The Plugins tab (press `tab` to switch) lets you control which Claude Code plugins are active per project. Unlike MCP servers, plugins are not managed through a central config. Instead, `cc-setup` discovers plugins directly from Claude Code's own plugin cache (`~/.claude/plugins/cache/`).
+
+Installing, updating, and removing plugins is still handled by Claude Code itself. What `cc-setup` does is let you toggle which installed plugins are enabled or disabled, per scope.
+
+**How it works:**
+
+- Plugins are discovered from Claude Code's cache directory
+- The enabled/disabled state is stored in `settings.json` (user or project scope)
+- User scope (`~/.claude/settings.json`) sets the baseline
+- Project scope (`.claude/settings.json`) stores only overrides on top of the user baseline
+- Press `space`/`x` to toggle individual plugins, `a` to toggle all
+
+**Why this matters:** Plugins add skills to Claude's context. A plugin with 20 skills that you only need for one type of project still competes for attention in every other project. Disabling irrelevant plugins per project keeps skill selection focused.
 
 ## Server types
 
