@@ -20,9 +20,8 @@ func ConfigPath(scope string) string {
 	return filepath.Join(cwd, mcpJSONName)
 }
 
-// ReadMcpServers reads the mcpServers dict from the Claude config for the given scope.
-func ReadMcpServers(scope string) ServerMap {
-	path := ConfigPath(scope)
+// readMcpServersFromPath reads the mcpServers dict from the given file path.
+func readMcpServersFromPath(path string) ServerMap {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return ServerMap{}
@@ -43,6 +42,58 @@ func ReadMcpServers(scope string) ServerMap {
 		return ServerMap{}
 	}
 	return servers
+}
+
+// ReadMcpServers reads the mcpServers dict from the Claude config for the given scope.
+func ReadMcpServers(scope string) ServerMap {
+	return readMcpServersFromPath(ConfigPath(scope))
+}
+
+// ReadInheritedMcpServers walks parent directories from the current working directory
+// upward to the filesystem root, reading .mcp.json files along the way. It returns
+// a map of server names to the source .mcp.json file path for servers that are
+// inherited (i.e., present in a parent directory but not in the local .mcp.json).
+// Closest parent wins for conflicts (first-found semantics).
+// Only relevant for project scope.
+func ReadInheritedMcpServers() map[string]string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil
+	}
+
+	// Read local .mcp.json to know which servers to skip
+	localPath := filepath.Join(cwd, mcpJSONName)
+	localServers := readMcpServersFromPath(localPath)
+
+	inherited := make(map[string]string)
+	dir := filepath.Dir(cwd)
+
+	for {
+		parentConfig := filepath.Join(dir, mcpJSONName)
+		parentServers := readMcpServersFromPath(parentConfig)
+		for name := range parentServers {
+			// Skip if already in local config (local wins)
+			if _, inLocal := localServers[name]; inLocal {
+				continue
+			}
+			// Skip if already found in a closer parent (first-found wins)
+			if _, found := inherited[name]; found {
+				continue
+			}
+			inherited[name] = parentConfig
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break // reached filesystem root
+		}
+		dir = parent
+	}
+
+	if len(inherited) == 0 {
+		return nil
+	}
+	return inherited
 }
 
 // WriteMcpServers merges servers into the Claude config file, removing deselected servers.
@@ -94,6 +145,141 @@ func WriteMcpServers(scope string, servers ServerMap, toRemove []string) (string
 		return "", fmt.Errorf("writing %s: %w", path, err)
 	}
 	return path, nil
+}
+
+// ReadDisabledMcpServers reads the disabledMcpServers list from ~/.claude.json
+// for the current working directory: .projects[cwd].disabledMcpServers
+func ReadDisabledMcpServers() []string {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".claude.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	// Level 1: top-level keys
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil
+	}
+	projectsRaw, ok := top["projects"]
+	if !ok {
+		return nil
+	}
+
+	// Level 2: projects map
+	var projects map[string]json.RawMessage
+	if err := json.Unmarshal(projectsRaw, &projects); err != nil {
+		return nil
+	}
+	cwd, _ := os.Getwd()
+	projRaw, ok := projects[cwd]
+	if !ok {
+		return nil
+	}
+
+	// Level 3: project entry
+	var projEntry map[string]json.RawMessage
+	if err := json.Unmarshal(projRaw, &projEntry); err != nil {
+		return nil
+	}
+	disabledRaw, ok := projEntry["disabledMcpServers"]
+	if !ok {
+		return nil
+	}
+
+	var disabled []string
+	if err := json.Unmarshal(disabledRaw, &disabled); err != nil {
+		return nil
+	}
+	return disabled
+}
+
+// WriteDisabledMcpServers writes the disabledMcpServers list into ~/.claude.json
+// under .projects[cwd]. All other keys at every level are preserved.
+// If disabled is empty, the disabledMcpServers key is removed.
+func WriteDisabledMcpServers(disabled []string) error {
+	home, _ := os.UserHomeDir()
+	path := filepath.Join(home, ".claude.json")
+
+	// Level 1: read top-level
+	var top map[string]json.RawMessage
+	if content, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(content, &top); err != nil {
+			top = make(map[string]json.RawMessage)
+		}
+	} else {
+		top = make(map[string]json.RawMessage)
+	}
+
+	// Level 2: read projects
+	var projects map[string]json.RawMessage
+	if raw, ok := top["projects"]; ok {
+		if err := json.Unmarshal(raw, &projects); err != nil {
+			projects = make(map[string]json.RawMessage)
+		}
+	} else {
+		projects = make(map[string]json.RawMessage)
+	}
+
+	// Level 3: read project entry
+	cwd, _ := os.Getwd()
+	var projEntry map[string]json.RawMessage
+	if raw, ok := projects[cwd]; ok {
+		if err := json.Unmarshal(raw, &projEntry); err != nil {
+			projEntry = make(map[string]json.RawMessage)
+		}
+	} else {
+		projEntry = make(map[string]json.RawMessage)
+	}
+
+	// Set or remove disabledMcpServers
+	if len(disabled) == 0 {
+		delete(projEntry, "disabledMcpServers")
+	} else {
+		disabledJSON, err := json.Marshal(disabled)
+		if err != nil {
+			return fmt.Errorf("marshalling disabledMcpServers: %w", err)
+		}
+		projEntry["disabledMcpServers"] = disabledJSON
+	}
+
+	// Write back level 3 -> 2 -> 1
+	projJSON, err := json.Marshal(projEntry)
+	if err != nil {
+		return fmt.Errorf("marshalling project entry: %w", err)
+	}
+	projects[cwd] = projJSON
+
+	projectsJSON, err := json.Marshal(projects)
+	if err != nil {
+		return fmt.Errorf("marshalling projects: %w", err)
+	}
+	top["projects"] = projectsJSON
+
+	output, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling claude.json: %w", err)
+	}
+	output = append(output, '\n')
+
+	if err := os.WriteFile(path, output, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	return nil
+}
+
+// DisabledMcpServersSet returns the disabled MCP servers as a set for O(1) lookup.
+func DisabledMcpServersSet() map[string]bool {
+	disabled := ReadDisabledMcpServers()
+	if len(disabled) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(disabled))
+	for _, name := range disabled {
+		set[name] = true
+	}
+	return set
 }
 
 const settingsFileName = "settings.local.json"

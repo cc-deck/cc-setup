@@ -192,10 +192,10 @@ func RenderServerTable(servers config.ServerMap, showDescription bool) string {
 	return t.Render()
 }
 
-// RenderActionTable prints a summary table with add/remove actions.
-func RenderActionTable(servers config.ServerMap, selected, toRemove []string) string {
+// RenderActionTable prints a summary table with add/remove/enable/disable actions.
+func RenderActionTable(servers config.ServerMap, selected, toRemove, toEnable, toDisable []string) string {
 	headers := []string{"Server", "Action", "Endpoint", "Auth"}
-	rows := make([][]string, 0, len(selected)+len(toRemove))
+	rows := make([][]string, 0, len(selected)+len(toRemove)+len(toEnable)+len(toDisable))
 
 	for _, name := range selected {
 		info := servers[name]
@@ -210,6 +210,22 @@ func RenderActionTable(servers config.ServerMap, selected, toRemove []string) st
 		rows = append(rows, []string{name, "remove", endpoint, "-"})
 	}
 
+	for _, name := range toEnable {
+		info := servers[name]
+		endpoint := ServerEndpoint(info)
+		_, authLabel := DecodeAuthForServer(name, info)
+		rows = append(rows, []string{name, "enable", endpoint, authLabel})
+	}
+
+	for _, name := range toDisable {
+		info := servers[name]
+		endpoint := ServerEndpoint(info)
+		_, authLabel := DecodeAuthForServer(name, info)
+		rows = append(rows, []string{name, "disable", endpoint, authLabel})
+	}
+
+	addRemoveCount := len(selected) + len(toRemove)
+
 	t := table.New().
 		Width(TermWidth()).
 		Headers(headers...).
@@ -223,11 +239,15 @@ func RenderActionTable(servers config.ServerMap, selected, toRemove []string) st
 			case 0:
 				s = s.Foreground(lipgloss.Color("6"))
 			case 1:
-				// Color the action column: first len(selected) rows are adds, rest are removes
+				// Color the action column based on section
 				if row < len(selected) {
-					s = s.Foreground(lipgloss.Color("2"))
+					s = s.Foreground(lipgloss.Color("2")) // add: green
+				} else if row < addRemoveCount {
+					s = s.Foreground(lipgloss.Color("1")) // remove: red
+				} else if row < addRemoveCount+len(toEnable) {
+					s = s.Foreground(lipgloss.Color("2")) // enable: green
 				} else {
-					s = s.Foreground(lipgloss.Color("1"))
+					s = s.Foreground(lipgloss.Color("1")) // disable: red
 				}
 			}
 			return s

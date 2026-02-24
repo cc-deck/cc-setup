@@ -44,7 +44,8 @@ type detailModel struct {
 }
 
 // buildDetailFields builds the field list based on server type.
-func buildDetailFields(server map[string]any) []detailField {
+// A read-only "Source" field showing the .mcp.json path is added after "Type".
+func buildDetailFields(server map[string]any, sourcePath string) []detailField {
 	stype, _ := server["type"].(string)
 	if stype == "" {
 		stype = "?"
@@ -52,6 +53,7 @@ func buildDetailFields(server map[string]any) []detailField {
 
 	fields := []detailField{
 		{label: "Type", value: stype, key: "type"},
+		{label: "Source", value: sourcePath, key: "source"},
 	}
 
 	switch stype {
@@ -100,11 +102,12 @@ func buildDetailFields(server map[string]any) []detailField {
 }
 
 // newDetailModel constructs a detail model for the given server.
-func newDetailModel(name string, server map[string]any, scope string, tab manageTab) detailModel {
+// sourcePath indicates the .mcp.json file where the server is defined (for inherited servers).
+func newDetailModel(name string, server map[string]any, scope string, tab manageTab, sourcePath string) detailModel {
 	return detailModel{
 		name:   name,
 		server: server,
-		fields: buildDetailFields(server),
+		fields: buildDetailFields(server, sourcePath),
 		cursor: 0,
 		scope:  scope,
 		tab:    tab,
@@ -137,6 +140,10 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 			f := m.fields[m.cursor]
+			if f.key == "source" {
+				// Source field is read-only
+				return m, nil
+			}
 			if f.key == "tools" {
 				m.action = detailToolPermissions
 			} else {
@@ -197,7 +204,14 @@ func (m detailModel) View() string {
 
 		label := fmt.Sprintf("%-*s", maxLabel, f.label)
 
-		if f.key == "tools" {
+		if f.key == "source" {
+			// Source field: read-only, rendered dimmed
+			if i == m.cursor {
+				b.WriteString("  " + cyanBold.Render(cursor) + labelFocused.Render(label) + "  " + dim.Render(f.value) + "\n")
+			} else {
+				b.WriteString("  " + cursor + labelStyle.Render(label) + "  " + dim.Render(f.value) + "\n")
+			}
+		} else if f.key == "tools" {
 			// Tool permissions entry: show arrow suffix
 			if i == m.cursor {
 				b.WriteString("  " + cyanBold.Render(cursor) + labelFocused.Render(label) + "  " + arrowStyle.Render("\u2192") + "\n")
@@ -227,7 +241,8 @@ func (m detailModel) View() string {
 
 // runServerDetail is the outer loop for the server detail view.
 // It alternates between the detail TUI and inline field editors.
-func runServerDetail(name string, servers config.ServerMap, scope string, tab manageTab) error {
+// sourcePath indicates the .mcp.json where the server is defined (empty for local servers).
+func runServerDetail(name string, servers config.ServerMap, scope string, tab manageTab, sourcePath string) error {
 	for {
 		serverDef, ok := servers[name]
 		if !ok {
@@ -237,7 +252,7 @@ func runServerDetail(name string, servers config.ServerMap, scope string, tab ma
 			return nil
 		}
 
-		m := newDetailModel(name, serverDef, scope, tab)
+		m := newDetailModel(name, serverDef, scope, tab, sourcePath)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		result, err := p.Run()
 		if err != nil {

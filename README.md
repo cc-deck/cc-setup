@@ -15,6 +15,7 @@ The practical effect is real. An MCP server with 20 tools that you only need in 
 ## Features
 
 - **Central server registry** with per-project activation via checkbox selection
+- **Inherited server detection** from parent directory `.mcp.json` files, with visual distinction
 - **Real-time health checks** with colored status indicators (green = OK, yellow = auth required, red = unreachable)
 - **Tool permissions management** to control which tools are auto-approved per server
 - **OAuth credential reuse** from Claude Code's stored tokens, with automatic refresh
@@ -154,6 +155,35 @@ When the management screen opens, each server is probed asynchronously. Status a
 
 For OAuth-protected servers, the CLI automatically uses tokens stored by Claude Code (see [OAuth credential reuse](#oauth-credential-reuse) below).
 
+### Inherited servers
+
+Claude Code merges `.mcp.json` files from parent directories. A server defined in `~/Work/.mcp.json` is effective in `~/Work/myproject/` even without a local `.mcp.json`. `cc-setup` detects these inherited servers and displays them alongside locally configured ones, so the management screen reflects the actual effective state.
+
+**How it works:**
+
+When in project scope, `cc-setup` walks from the current directory upward to the filesystem root, reading `.mcp.json` files along the way. Servers found in parent directories (that also exist in the central registry) appear in the list with distinct visual styling:
+
+| Style | Meaning |
+|-------|---------|
+| Green `[x]` | Locally configured and enabled |
+| Muted green `[x]` | Inherited from a parent directory and enabled |
+| Dim `[ ]` | Not configured (normal server) |
+| Grey `[ ]` | Inherited but disabled |
+
+Inherited servers also show dimmed name and detail text when not focused, making it easy to distinguish them from locally managed servers at a glance.
+
+**Conflict resolution:** If the same server appears in both the local `.mcp.json` and a parent directory, the local definition wins and the server is treated as non-inherited (normal styling). Among parent directories, the closest parent wins.
+
+**Save behavior for inherited servers:**
+
+- Checking an inherited server is a no-op on save (it's already active via the parent config, no redundant entry is written to the local `.mcp.json`)
+- Unchecking an inherited server adds it to `disabledMcpServers` in `~/.claude.json`, which tells Claude Code to suppress it for this project
+- Re-checking a previously disabled inherited server removes it from `disabledMcpServers`
+
+**Detail view:** Pressing `e`/`enter` on any server shows a "Source" field indicating which `.mcp.json` file provides the server definition.
+
+Inheritance only applies in project scope. In user scope, inherited servers are not shown.
+
 ### Tool permissions
 
 Enter a server's detail view (`e`/`enter`) and select "Tool permissions" to discover its tools and configure which ones Claude Code may auto-approve.
@@ -276,7 +306,9 @@ Servers with static `Authorization` headers configured in their definition are n
 The tool reads server definitions from `~/.config/cc-setup/mcp.json` and writes to Claude Code's config files. When you select servers:
 
 - **Selected servers** are written to the target config (`.mcp.json` or `~/.claude.json`), with the `description` field stripped
+- **Inherited servers** that remain checked are not written to the local config (they are already active via a parent `.mcp.json`)
 - **Unchecked servers** (that exist in the central config) are removed from the target config
+- **Unchecked inherited servers** are added to `disabledMcpServers` in `~/.claude.json` for the current project
 - **Unknown servers** (not in the central config) are left untouched
 
 This means you can use `cc-setup` alongside manually configured servers without conflicts.
@@ -286,8 +318,8 @@ This means you can use `cc-setup` alongside manually configured servers without 
 | File | Purpose |
 |------|---------|
 | `~/.config/cc-setup/mcp.json` | Central server registry |
-| `~/.claude.json` | Claude Code user-global config |
-| `.mcp.json` | Claude Code project-local config |
+| `~/.claude.json` | Claude Code user-global config (also stores `disabledMcpServers` per project) |
+| `.mcp.json` | Claude Code project-local config (also read from parent directories for inheritance) |
 | `~/.claude/settings.local.json` | User-scoped tool permissions |
 | `.claude/settings.local.json` | Project-scoped tool permissions |
 | `~/.claude/.credentials.json` | Claude Code's OAuth tokens (read-only by this tool, except for token refresh write-back) |
