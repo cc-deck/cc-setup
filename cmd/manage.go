@@ -91,8 +91,9 @@ type healthResultMsg struct {
 
 // checkboxDelegate renders single-line items with [x]/[ ] checkboxes.
 type checkboxDelegate struct {
-	checked map[string]bool
-	health  map[string]mcpclient.HealthResult
+	checked   map[string]bool
+	health    map[string]mcpclient.HealthResult
+	inherited map[string]string // server name -> parent .mcp.json path (nil for non-inherited)
 }
 
 func (d checkboxDelegate) Height() int                             { return 1 }
@@ -107,6 +108,7 @@ func (d checkboxDelegate) Render(w io.Writer, m list.Model, index int, item list
 
 	isFocused := index == m.Index()
 	isChecked := d.checked[si.name]
+	_, isInherited := d.inherited[si.name]
 
 	// Health indicator
 	healthDot := display.StyleHealthUnknown.Render("○")
@@ -145,7 +147,17 @@ func (d checkboxDelegate) Render(w io.Writer, m list.Model, index int, item list
 
 		cbStyled := cyanBold.Render(cb)
 		if isChecked {
-			cbStyled = green.Render(cb)
+			if isInherited {
+				// Inherited checked: muted green
+				mutedGreen := lipgloss.NewStyle().Foreground(lipgloss.Color("#557755")).Bold(true)
+				cbStyled = mutedGreen.Render(cb)
+			} else {
+				cbStyled = green.Render(cb)
+			}
+		} else if isInherited {
+			// Inherited unchecked: grey
+			grey := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+			cbStyled = grey.Render(cb)
 		}
 
 		line := healthDot + " " + cyanBold.Render(cursor) + cbStyled + " " + cyanBold.Render(paddedName) + cyan.Render(si.detail)
@@ -157,16 +169,32 @@ func (d checkboxDelegate) Render(w io.Writer, m list.Model, index int, item list
 		dim := lipgloss.NewStyle().Faint(true)
 		green := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
 
-		cbStyled := dim.Render(cb)
-		if isChecked {
-			cbStyled = green.Render(cb)
-		}
+		if isInherited {
+			// Inherited servers: grey/dim styling
+			grey := lipgloss.NewStyle().Foreground(lipgloss.Color("#666666"))
+			cbStyled := grey.Render(cb)
+			if isChecked {
+				mutedGreen := lipgloss.NewStyle().Foreground(lipgloss.Color("#557755"))
+				cbStyled = mutedGreen.Render(cb)
+			}
 
-		line := healthDot + " " + cursor + cbStyled + " " + paddedName + dim.Render(si.detail)
-		if si.desc != "" {
-			line += "  " + dim.Render(si.desc)
+			line := healthDot + " " + cursor + cbStyled + " " + grey.Render(paddedName) + dim.Render(si.detail)
+			if si.desc != "" {
+				line += "  " + dim.Render(si.desc)
+			}
+			fmt.Fprint(w, line)
+		} else {
+			cbStyled := dim.Render(cb)
+			if isChecked {
+				cbStyled = green.Render(cb)
+			}
+
+			line := healthDot + " " + cursor + cbStyled + " " + paddedName + dim.Render(si.detail)
+			if si.desc != "" {
+				line += "  " + dim.Render(si.desc)
+			}
+			fmt.Fprint(w, line)
 		}
-		fmt.Fprint(w, line)
 	}
 }
 
@@ -239,15 +267,16 @@ type pendingChange struct {
 
 // manageModel is the BubbleTea model for the unified server management screen.
 type manageModel struct {
-	list     list.Model
-	keys     manageKeyMap
-	action   manageAction
-	selected string
-	checked  map[string]bool
-	health   map[string]mcpclient.HealthResult
-	scope    string
-	servers  config.ServerMap
-	width    int
+	list      list.Model
+	keys      manageKeyMap
+	action    manageAction
+	selected  string
+	checked   map[string]bool
+	health    map[string]mcpclient.HealthResult
+	scope     string
+	servers   config.ServerMap
+	inherited map[string]string // server name -> parent .mcp.json path
+	width     int
 
 	// Plugin tab state
 	tab            manageTab
@@ -265,12 +294,31 @@ type manageModel struct {
 
 // loadCheckedState reads the Claude config for the given scope and returns
 // a map of server names to whether they are enabled.
-func loadCheckedState(servers config.ServerMap, scope string) map[string]bool {
+// In project scope, inherited servers are also marked as checked, and
+// servers listed in disabledMcpServers are marked unchecked.
+func loadCheckedState(servers config.ServerMap, scope string, inherited map[string]string) map[string]bool {
 	existing := config.ReadMcpServers(scope)
 	checked := make(map[string]bool, len(servers))
 	for name := range servers {
 		if _, ok := existing[name]; ok {
 			checked[name] = true
+		}
+	}
+	// In project scope, inherited servers are effectively checked
+	if scope == "project" && inherited != nil {
+		for name := range inherited {
+			if _, inCentral := servers[name]; inCentral {
+				checked[name] = true
+			}
+		}
+	}
+	// In project scope, disabled servers override the checked state
+	if scope == "project" {
+		disabled := config.DisabledMcpServersSet()
+		for name := range disabled {
+			if _, inCentral := servers[name]; inCentral {
+				checked[name] = false
+			}
 		}
 	}
 	return checked
@@ -393,12 +441,12 @@ func tabbedBanner(scope string, tab manageTab, width int) string {
 	return content
 }
 
-func newManageModel(servers config.ServerMap, scope string, checked map[string]bool, plugins []config.PluginInfo, pluginChecked map[string]bool, tab manageTab) manageModel {
+func newManageModel(servers config.ServerMap, scope string, checked map[string]bool, inherited map[string]string, plugins []config.PluginInfo, pluginChecked map[string]bool, tab manageTab) manageModel {
 	items := buildServerItems(servers)
 	keys := newManageKeyMap()
 	health := make(map[string]mcpclient.HealthResult, len(servers))
 
-	delegate := checkboxDelegate{checked: checked, health: health}
+	delegate := checkboxDelegate{checked: checked, health: health, inherited: inherited}
 
 	l := list.New(items, delegate, 0, 0)
 	l.SetShowTitle(false)
@@ -444,6 +492,7 @@ func newManageModel(servers config.ServerMap, scope string, checked map[string]b
 		health:         health,
 		scope:          scope,
 		servers:        servers,
+		inherited:      inherited,
 		tab:            tab,
 		pluginList:     pl,
 		pluginKeys:     pKeys,
@@ -658,6 +707,8 @@ func (m manageModel) updatePluginTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // reloadCheckedState clears the checked map and refills it from the current scope's
 // Claude config. The map is mutated in place so the delegate's reference stays valid.
+// In project scope, inherited servers are also marked checked, and disabled servers
+// override the checked state.
 func (m *manageModel) reloadCheckedState() {
 	for k := range m.checked {
 		delete(m.checked, k)
@@ -666,6 +717,21 @@ func (m *manageModel) reloadCheckedState() {
 	for name := range m.servers {
 		if _, ok := existing[name]; ok {
 			m.checked[name] = true
+		}
+	}
+	if m.scope == "project" {
+		// Inherited servers are effectively checked
+		for name := range m.inherited {
+			if _, inCentral := m.servers[name]; inCentral {
+				m.checked[name] = true
+			}
+		}
+		// Disabled servers override
+		disabled := config.DisabledMcpServersSet()
+		for name := range disabled {
+			if _, inCentral := m.servers[name]; inCentral {
+				m.checked[name] = false
+			}
 		}
 	}
 }
@@ -685,16 +751,28 @@ func (m *manageModel) reloadPluginCheckedState() {
 }
 
 // computeServerChanges returns the list of server changes vs the current config.
+// Uses loadCheckedState to get the original state (including disabled-awareness)
+// and compares against the current checked map. Inherited servers use "enable"/"disable"
+// action labels instead of "add"/"remove".
 func (m *manageModel) computeServerChanges() []pendingChange {
-	existing := config.ReadMcpServers(m.scope)
+	original := loadCheckedState(m.servers, m.scope, m.inherited)
 	var changes []pendingChange
 	for _, name := range config.ServerNames(m.servers) {
-		_, inConfig := existing[name]
+		wasChecked := original[name]
 		isChecked := m.checked[name]
-		if isChecked && !inConfig {
-			changes = append(changes, pendingChange{name, "add"})
-		} else if !isChecked && inConfig {
-			changes = append(changes, pendingChange{name, "remove"})
+		_, isInherited := m.inherited[name]
+		if isChecked && !wasChecked {
+			if isInherited {
+				changes = append(changes, pendingChange{name, "enable"})
+			} else {
+				changes = append(changes, pendingChange{name, "add"})
+			}
+		} else if !isChecked && wasChecked {
+			if isInherited {
+				changes = append(changes, pendingChange{name, "disable"})
+			} else {
+				changes = append(changes, pendingChange{name, "remove"})
+			}
 		}
 	}
 	return changes
@@ -742,10 +820,15 @@ func (m manageModel) confirmQuitView() string {
 	if len(m.pendingServerChanges) > 0 {
 		b.WriteString("\n  " + bold.Render("MCP Servers") + "\n")
 		for _, c := range m.pendingServerChanges {
-			if c.action == "add" {
-				b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ add   "), c.name))
-			} else {
-				b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- remove"), c.name))
+			switch c.action {
+			case "add":
+				b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ add    "), c.name))
+			case "remove":
+				b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- remove "), c.name))
+			case "enable":
+				b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ enable "), c.name))
+			case "disable":
+				b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- disable"), c.name))
 			}
 		}
 	}
@@ -766,27 +849,84 @@ func (m manageModel) confirmQuitView() string {
 	return b.String()
 }
 
+// computeNewDisabledList builds the new disabledMcpServers list.
+// It preserves disabled entries for servers not in the central config (we don't manage those),
+// adds unchecked inherited servers to the disabled list, and skips non-inherited unchecked
+// servers (those are simply absent from .mcp.json).
+func computeNewDisabledList(servers config.ServerMap, checked map[string]bool, inherited map[string]string) []string {
+	existing := config.ReadDisabledMcpServers()
+
+	// Preserve disabled entries for servers not in central config
+	var result []string
+	for _, name := range existing {
+		if _, inCentral := servers[name]; !inCentral {
+			result = append(result, name)
+		}
+	}
+
+	// Add unchecked central servers to disabled list:
+	// - Inherited servers that are unchecked need a disabled entry
+	// - Non-inherited unchecked servers also need a disabled entry
+	//   (they may be in the local .mcp.json from a previous save)
+	for _, name := range config.ServerNames(servers) {
+		if !checked[name] {
+			result = append(result, name)
+		}
+	}
+	return result
+}
+
 // runSave computes adds/removes vs the current Claude config, shows a summary,
-// confirms, and writes to the scope's config file.
-func runSave(servers config.ServerMap, checked map[string]bool, scope string) error {
+// confirms, and writes to the scope's config file. Inherited servers that are
+// checked are not written redundantly to local .mcp.json; unchecked inherited
+// servers are added to disabledMcpServers.
+func runSave(servers config.ServerMap, checked map[string]bool, scope string, inherited map[string]string) error {
 	existing := config.ReadMcpServers(scope)
 
 	var selected []string
+	var toEnable []string
 	for _, name := range config.ServerNames(servers) {
-		if checked[name] {
-			selected = append(selected, name)
+		if !checked[name] {
+			continue
 		}
+		// Skip inherited-and-checked servers (don't write redundantly to local .mcp.json)
+		if _, isInherited := inherited[name]; isInherited {
+			toEnable = append(toEnable, name)
+			continue
+		}
+		selected = append(selected, name)
 	}
 
 	// Servers that were configured but are now unchecked (only those in central config)
 	var toRemove []string
+	var toDisable []string
 	for name := range existing {
 		if _, inCentral := servers[name]; inCentral && !checked[name] {
 			toRemove = append(toRemove, name)
 		}
 	}
+	// Inherited servers that are unchecked
+	for name := range inherited {
+		if _, inCentral := servers[name]; inCentral && !checked[name] {
+			toDisable = append(toDisable, name)
+		}
+	}
 
-	if len(selected) == 0 && len(toRemove) == 0 {
+	// Check which enable/disable actions are actual changes vs current state
+	originalChecked := loadCheckedState(servers, scope, inherited)
+	var actualEnable, actualDisable []string
+	for _, name := range toEnable {
+		if !originalChecked[name] {
+			actualEnable = append(actualEnable, name)
+		}
+	}
+	for _, name := range toDisable {
+		if originalChecked[name] {
+			actualDisable = append(actualDisable, name)
+		}
+	}
+
+	if len(selected) == 0 && len(toRemove) == 0 && len(actualEnable) == 0 && len(actualDisable) == 0 {
 		fmt.Println(display.StyleDim.Render("No changes to apply."))
 		return nil
 	}
@@ -801,7 +941,7 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string) er
 	fmt.Printf("  Scope: %s\n", display.StyleTitle.Render(scopeLabel))
 	fmt.Printf("  File:  %s\n", target)
 	fmt.Println()
-	fmt.Println(display.RenderActionTable(servers, selected, toRemove))
+	fmt.Println(display.RenderActionTable(servers, selected, toRemove, actualEnable, actualDisable))
 	fmt.Println()
 
 	confirmed, err := confirm("Apply this configuration?", true)
@@ -822,6 +962,14 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string) er
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
+	// In project scope, also update disabledMcpServers in ~/.claude.json
+	if scope == "project" {
+		newDisabled := computeNewDisabledList(servers, checked, inherited)
+		if err := config.WriteDisabledMcpServers(newDisabled); err != nil {
+			return fmt.Errorf("failed to write disabledMcpServers: %w", err)
+		}
+	}
+
 	if len(entries) > 0 {
 		names := make([]string, 0, len(entries))
 		for n := range entries {
@@ -831,6 +979,12 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string) er
 	}
 	if len(toRemove) > 0 {
 		fmt.Printf("  %s %s\n", display.StyleRed.Render("Removed"), strings.Join(toRemove, ", "))
+	}
+	if len(actualEnable) > 0 {
+		fmt.Printf("  %s %s\n", display.StyleGreen.Render("Enabled"), strings.Join(actualEnable, ", "))
+	}
+	if len(actualDisable) > 0 {
+		fmt.Printf("  %s %s\n", display.StyleRed.Render("Disabled"), strings.Join(actualDisable, ", "))
 	}
 	fmt.Println()
 	fmt.Printf("  Written to %s\n", path)
@@ -857,7 +1011,23 @@ func runManage() error {
 			return runManageEmpty()
 		}
 
-		checked := loadCheckedState(servers, scope)
+		// Compute inherited servers for project scope (filtered to central config only)
+		var inherited map[string]string
+		if scope == "project" {
+			if raw := config.ReadInheritedMcpServers(); raw != nil {
+				inherited = make(map[string]string)
+				for name, path := range raw {
+					if _, inCentral := servers[name]; inCentral {
+						inherited[name] = path
+					}
+				}
+				if len(inherited) == 0 {
+					inherited = nil
+				}
+			}
+		}
+
+		checked := loadCheckedState(servers, scope, inherited)
 
 		// Discover plugins and compute effective enabled state
 		plugins, _ := config.DiscoverPlugins()
@@ -869,7 +1039,7 @@ func runManage() error {
 			config.ReadEnabledPlugins("project"),
 		)
 
-		m := newManageModel(servers, scope, checked, plugins, pluginEffective, tab)
+		m := newManageModel(servers, scope, checked, inherited, plugins, pluginEffective, tab)
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		result, err := p.Run()
 		if err != nil {
@@ -895,7 +1065,12 @@ func runManage() error {
 			}
 
 		case actionEdit:
-			if err := runServerDetail(final.selected, servers, final.scope, final.tab); err != nil && err != errCancelled {
+			// Compute source path for the detail view
+			sourcePath := config.ConfigPath(final.scope)
+			if p, ok := final.inherited[final.selected]; ok {
+				sourcePath = p
+			}
+			if err := runServerDetail(final.selected, servers, final.scope, final.tab, sourcePath); err != nil && err != errCancelled {
 				return err
 			}
 
@@ -905,7 +1080,7 @@ func runManage() error {
 			}
 
 		case actionSave:
-			if err := runSave(final.servers, final.checked, final.scope); err != nil && err != errCancelled {
+			if err := runSave(final.servers, final.checked, final.scope, final.inherited); err != nil && err != errCancelled {
 				return err
 			}
 
@@ -920,7 +1095,7 @@ func runManage() error {
 			}
 
 		case actionSaveAll:
-			if err := applySaveAll(final.servers, final.checked, final.pluginChecked, final.scope); err != nil {
+			if err := applySaveAll(final.servers, final.checked, final.pluginChecked, final.scope, final.inherited); err != nil {
 				return err
 			}
 			return nil
@@ -997,16 +1172,21 @@ func runSavePlugins(checked map[string]bool, scope string) error {
 
 // applySaveAll saves both server and plugin changes without additional confirmation.
 // Used when the user confirms from the quit dialog.
-func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginChecked map[string]bool, scope string) error {
+func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginChecked map[string]bool, scope string, inherited map[string]string) error {
 	saved := false
 
 	// Save server changes
 	existing := config.ReadMcpServers(scope)
 	var selected []string
 	for _, name := range config.ServerNames(servers) {
-		if checked[name] {
-			selected = append(selected, name)
+		if !checked[name] {
+			continue
 		}
+		// Skip inherited-and-checked servers (don't write redundantly)
+		if _, isInherited := inherited[name]; isInherited {
+			continue
+		}
+		selected = append(selected, name)
 	}
 	var toRemove []string
 	for name := range existing {
@@ -1036,6 +1216,14 @@ func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginCheck
 		}
 		fmt.Printf("  Written to %s\n", path)
 		saved = true
+	}
+	// In project scope, always update disabledMcpServers in ~/.claude.json
+	// (handles inherited servers that were disabled)
+	if scope == "project" {
+		newDisabled := computeNewDisabledList(servers, checked, inherited)
+		if err := config.WriteDisabledMcpServers(newDisabled); err != nil {
+			return fmt.Errorf("failed to write disabledMcpServers: %w", err)
+		}
 	}
 
 	// Save plugin changes
