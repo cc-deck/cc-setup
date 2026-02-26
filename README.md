@@ -2,7 +2,7 @@
 
 Interactive CLI to manage which MCP servers and plugins are active per project in [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-![cc-setup server management](docs/cc-setup-screenshot.png)
+![cc-setup demo](docs/demo.gif)
 
 ## Why this matters
 

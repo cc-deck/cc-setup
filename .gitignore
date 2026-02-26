@@ -4,3 +4,7 @@ mcp-setup
 dist/
 .claude/settings.json
 .claude/settings.local.json
+
+# Demo generated files (scripts are tracked, outputs are not)
+demo/demo.cast
+demo/demo.gif
