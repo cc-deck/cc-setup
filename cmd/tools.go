@@ -26,10 +26,7 @@ var toolCache sync.Map // map[string][]mcpclient.ToolInfo
 func runToolPermissions(name string, servers config.ServerMap, scope string) error {
 	serverDef, ok := servers[name]
 	if !ok {
-		fmt.Printf("%s Server %s not found.\n",
-			display.StyleYellow.Render("Warning:"),
-			display.StyleCyan.Render(name))
-		return nil
+		return fmt.Errorf("server %s not found", name)
 	}
 
 	// Try cache first.
@@ -44,12 +41,10 @@ func runToolPermissions(name string, servers config.ServerMap, scope string) err
 		var err error
 		tools, err = mcpclient.ListTools(ctx, name, serverDef)
 		if err != nil {
-			fmt.Printf("  %s %v\n\n", display.StyleRed.Render("Error:"), err)
-			return nil // non-fatal, return to list
+			return fmt.Errorf("failed to discover tools: %v", err)
 		}
 		if len(tools) == 0 {
-			fmt.Printf("  %s\n\n", display.StyleDim.Render("No tools found."))
-			return nil
+			return fmt.Errorf("no tools found for %s", name)
 		}
 		toolCache.Store(name, tools)
 	}
@@ -276,6 +271,13 @@ type toolsModel struct {
 	scope      string
 	saved      bool
 	widthPtr   *int // shared with delegate for description truncation
+
+	// Initial state for dirty-checking
+	initialChecked map[string]bool
+	initialScope   string
+
+	// Quit confirmation dialog
+	confirmQuit bool
 }
 
 // toolsBannerHeight is the number of lines used by the banner.
@@ -316,19 +318,40 @@ func newToolsModel(serverName string, tools []mcpclient.ToolInfo, checked map[st
 		return []key.Binding{keys.Toggle, keys.ToggleAll, keys.Save, keys.ScopeProject, keys.ScopeUser, keys.Quit}
 	}
 
+	// Snapshot initial state for dirty-checking.
+	initialChecked := make(map[string]bool, len(checked))
+	for k, v := range checked {
+		initialChecked[k] = v
+	}
+
 	return toolsModel{
-		list:       l,
-		keys:       keys,
-		checked:    checked,
-		serverName: serverName,
-		tools:      tools,
-		scope:      scope,
-		widthPtr:   widthPtr,
+		list:           l,
+		keys:           keys,
+		checked:        checked,
+		serverName:     serverName,
+		tools:          tools,
+		scope:          scope,
+		widthPtr:       widthPtr,
+		initialChecked: initialChecked,
+		initialScope:   scope,
 	}
 }
 
 func (m toolsModel) Init() tea.Cmd {
 	return nil
+}
+
+// isDirty returns true if the checked state or scope differs from the initial snapshot.
+func (m toolsModel) isDirty() bool {
+	if m.scope != m.initialScope {
+		return true
+	}
+	for _, t := range m.tools {
+		if m.checked[t.Name] != m.initialChecked[t.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 func (m toolsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -339,12 +362,31 @@ func (m toolsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Handle quit confirmation dialog first
+		if m.confirmQuit {
+			switch msg.String() {
+			case "s":
+				m.saved = true
+				return m, tea.Quit
+			case "d":
+				return m, tea.Quit
+			case "esc":
+				m.confirmQuit = false
+				return m, nil
+			}
+			return m, nil
+		}
+
 		if m.list.FilterState() == list.Filtering {
 			break
 		}
 
 		switch {
 		case key.Matches(msg, m.keys.Quit):
+			if m.isDirty() {
+				m.confirmQuit = true
+				return m, nil
+			}
 			return m, tea.Quit
 
 		case key.Matches(msg, m.keys.Toggle):
@@ -371,6 +413,7 @@ func (m toolsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.scope != "project" {
 				m.scope = "project"
 				m.reloadCheckedState()
+				m.snapshotInitialState()
 			}
 			return m, nil
 
@@ -378,6 +421,7 @@ func (m toolsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.scope != "user" {
 				m.scope = "user"
 				m.reloadCheckedState()
+				m.snapshotInitialState()
 			}
 			return m, nil
 
@@ -411,8 +455,55 @@ func (m *toolsModel) reloadCheckedState() {
 	}
 }
 
+// snapshotInitialState captures the current checked state and scope as the
+// baseline for dirty-checking. Called after scope switches reload from disk.
+func (m *toolsModel) snapshotInitialState() {
+	m.initialScope = m.scope
+	for k := range m.initialChecked {
+		delete(m.initialChecked, k)
+	}
+	for k, v := range m.checked {
+		m.initialChecked[k] = v
+	}
+}
+
 func (m toolsModel) View() string {
-	return toolsBanner(m.scope, m.serverName, *m.widthPtr) + "\n" + m.list.View()
+	banner := toolsBanner(m.scope, m.serverName, *m.widthPtr)
+	if m.confirmQuit {
+		return banner + "\n" + m.confirmQuitView()
+	}
+	return banner + "\n" + m.list.View()
+}
+
+// confirmQuitView renders the unsaved-changes dialog.
+func (m toolsModel) confirmQuitView() string {
+	var b strings.Builder
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
+	green := lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+	red := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	dim := lipgloss.NewStyle().Faint(true)
+
+	b.WriteString("\n  " + title.Render("Unsaved changes") + "\n\n")
+
+	if m.scope != m.initialScope {
+		b.WriteString(fmt.Sprintf("    Scope changed: %s -> %s\n",
+			dim.Render(m.initialScope), dim.Render(m.scope)))
+	}
+
+	for _, t := range m.tools {
+		was := m.initialChecked[t.Name]
+		now := m.checked[t.Name]
+		if now && !was {
+			b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ allow "), t.Name))
+		} else if !now && was {
+			b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- remove"), t.Name))
+		}
+	}
+
+	b.WriteString("\n  " + dim.Render("[s] Save & quit  [d] Discard & quit  [esc] Back to list") + "\n")
+
+	return b.String()
 }
 
 // toolsBanner renders a full-width scope-aware bar with the scope, target file, and server name.

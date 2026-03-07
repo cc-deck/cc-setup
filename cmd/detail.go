@@ -32,20 +32,21 @@ type detailField struct {
 
 // detailModel is the BubbleTea model for the server detail view.
 type detailModel struct {
-	name   string
-	server map[string]any
-	fields []detailField
-	cursor int
-	width  int
-	scope  string
-	tab    manageTab
-	action detailAction
-	selKey string // key of the selected field when action is detailEditField
+	name      string
+	server    map[string]any
+	fields    []detailField
+	cursor    int
+	width     int
+	scope     string
+	tab       manageTab
+	action    detailAction
+	selKey    string // key of the selected field when action is detailEditField
+	statusMsg string // transient status message shown at bottom (e.g. error from tool discovery)
 }
 
 // buildDetailFields builds the field list based on server type.
 // A read-only "Source" field showing the .mcp.json path is added after "Type".
-func buildDetailFields(server map[string]any, sourcePath string) []detailField {
+func buildDetailFields(name string, server map[string]any, sourcePath string) []detailField {
 	stype, _ := server["type"].(string)
 	if stype == "" {
 		stype = "?"
@@ -61,8 +62,7 @@ func buildDetailFields(server map[string]any, sourcePath string) []detailField {
 		url, _ := server["url"].(string)
 		fields = append(fields, detailField{label: "URL", value: url, key: "url"})
 
-		headers := serverHeaders(server)
-		_, authLabel := display.DecodeAuth(headers)
+		_, authLabel := display.DecodeAuthForServer(name, server)
 		fields = append(fields, detailField{label: "Authentication", value: authLabel, key: "auth"})
 
 	case "stdio":
@@ -107,7 +107,7 @@ func newDetailModel(name string, server map[string]any, scope string, tab manage
 	return detailModel{
 		name:   name,
 		server: server,
-		fields: buildDetailFields(server, sourcePath),
+		fields: buildDetailFields(name, server, sourcePath),
 		cursor: 0,
 		scope:  scope,
 		tab:    tab,
@@ -125,6 +125,9 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// Clear transient status on any key press
+		m.statusMsg = ""
+
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
 			if m.cursor > 0 {
@@ -233,6 +236,12 @@ func (m detailModel) View() string {
 		}
 	}
 
+	// Status message (transient, e.g. error from tool discovery)
+	if m.statusMsg != "" {
+		warn := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+		b.WriteString("\n  " + warn.Render(m.statusMsg) + "\n")
+	}
+
 	// Help line
 	b.WriteString("\n  " + dim.Render("enter edit  esc back") + "\n")
 
@@ -243,6 +252,8 @@ func (m detailModel) View() string {
 // It alternates between the detail TUI and inline field editors.
 // sourcePath indicates the .mcp.json where the server is defined (empty for local servers).
 func runServerDetail(name string, servers config.ServerMap, scope string, tab manageTab, sourcePath string) error {
+	var statusMsg string // persists across loop iterations until displayed
+
 	for {
 		serverDef, ok := servers[name]
 		if !ok {
@@ -253,6 +264,8 @@ func runServerDetail(name string, servers config.ServerMap, scope string, tab ma
 		}
 
 		m := newDetailModel(name, serverDef, scope, tab, sourcePath)
+		m.statusMsg = statusMsg
+		statusMsg = "" // consume after passing to model
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		result, err := p.Run()
 		if err != nil {
@@ -276,8 +289,13 @@ func runServerDetail(name string, servers config.ServerMap, scope string, tab ma
 		case detailToolPermissions:
 			// Clear screen for tools view
 			fmt.Print("\033[2J\033[H")
-			if err := runToolPermissions(name, servers, scope); err != nil && err != errCancelled {
-				return err
+			if err := runToolPermissions(name, servers, scope); err != nil {
+				if err == errCancelled {
+					// user cancelled, no message needed
+				} else {
+					// Show error as status in the detail view on next iteration
+					statusMsg = err.Error()
+				}
 			}
 			// Reload servers in case tool permissions changed autoApprove
 			reloaded, err := config.LoadServers()
