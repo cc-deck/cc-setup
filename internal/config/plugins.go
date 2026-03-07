@@ -146,8 +146,7 @@ func PluginSettingsPath(scope string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, ".claude", "settings.json")
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, ".claude", "settings.json")
+	return filepath.Join(canonicalCwd(), ".claude", "settings.json")
 }
 
 // ReadEnabledPlugins reads the enabledPlugins map from settings.json for

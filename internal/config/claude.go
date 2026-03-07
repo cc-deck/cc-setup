@@ -10,14 +10,68 @@ import (
 
 const mcpJSONName = ".mcp.json"
 
+// canonicalCwd returns the current working directory with symlinks and
+// filesystem case resolved. On macOS (case-insensitive APFS), $PWD may
+// contain non-canonical casing (e.g. "work" instead of "Work"), causing
+// path-keyed lookups in ~/.claude.json to miss entries written by Claude
+// Code under the real casing.
+//
+// filepath.EvalSymlinks resolves symlinks but not case, so we walk each
+// path component and match it against actual directory entries to recover
+// the on-disk casing.
+func canonicalCwd() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(cwd)
+	if err != nil {
+		resolved = cwd
+	}
+	return resolveCase(resolved)
+}
+
+// resolveCase walks an absolute path component by component and replaces
+// each segment with its actual on-disk name, fixing case mismatches on
+// case-insensitive filesystems. Returns the original path on any error.
+func resolveCase(path string) string {
+	if !filepath.IsAbs(path) {
+		return path
+	}
+
+	parts := strings.Split(path, string(filepath.Separator))
+	// parts[0] is "" for an absolute path starting with /
+	resolved := string(filepath.Separator)
+	for _, part := range parts[1:] {
+		if part == "" {
+			continue
+		}
+		entries, err := os.ReadDir(resolved)
+		if err != nil {
+			return path // fall back to original
+		}
+		found := false
+		for _, e := range entries {
+			if strings.EqualFold(e.Name(), part) {
+				resolved = filepath.Join(resolved, e.Name())
+				found = true
+				break
+			}
+		}
+		if !found {
+			return path // component doesn't exist, return original
+		}
+	}
+	return resolved
+}
+
 // ConfigPath returns the Claude config file path for a scope.
 func ConfigPath(scope string) string {
 	if scope == "user" {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, ".claude.json")
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, mcpJSONName)
+	return filepath.Join(canonicalCwd(), mcpJSONName)
 }
 
 // readMcpServersFromPath reads the mcpServers dict from the given file path.
@@ -56,8 +110,8 @@ func ReadMcpServers(scope string) ServerMap {
 // Closest parent wins for conflicts (first-found semantics).
 // Only relevant for project scope.
 func ReadInheritedMcpServers() map[string]string {
-	cwd, err := os.Getwd()
-	if err != nil {
+	cwd := canonicalCwd()
+	if cwd == "" {
 		return nil
 	}
 
@@ -172,7 +226,7 @@ func ReadDisabledMcpServers() []string {
 	if err := json.Unmarshal(projectsRaw, &projects); err != nil {
 		return nil
 	}
-	cwd, _ := os.Getwd()
+	cwd := canonicalCwd()
 	projRaw, ok := projects[cwd]
 	if !ok {
 		return nil
@@ -223,7 +277,7 @@ func WriteDisabledMcpServers(disabled []string) error {
 	}
 
 	// Level 3: read project entry
-	cwd, _ := os.Getwd()
+	cwd := canonicalCwd()
 	var projEntry map[string]json.RawMessage
 	if raw, ok := projects[cwd]; ok {
 		if err := json.Unmarshal(raw, &projEntry); err != nil {
@@ -292,8 +346,7 @@ func SettingsPath(scope string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, ".claude", settingsFileName)
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, ".claude", settingsFileName)
+	return filepath.Join(canonicalCwd(), ".claude", settingsFileName)
 }
 
 // mcpPermPrefix returns the permission entry prefix for a server,
@@ -365,21 +418,28 @@ func WriteToolPermissions(scope, serverName string, toolNames []string, allToolN
 		data = make(map[string]json.RawMessage)
 	}
 
-	// Parse existing permissions
-	type permissionsBlock struct {
-		Allow []string `json:"allow"`
-		Deny  []string `json:"deny"`
-	}
-	var perms permissionsBlock
+	// Parse existing permissions as a generic map to preserve unknown keys
+	// (e.g. "ask", "defaultMode") that are not part of allow/deny.
+	permsMap := make(map[string]json.RawMessage)
 	if raw, ok := data["permissions"]; ok {
-		_ = json.Unmarshal(raw, &perms)
+		_ = json.Unmarshal(raw, &permsMap)
+	}
+
+	// Extract allow and deny arrays from the map.
+	var allow []string
+	if raw, ok := permsMap["allow"]; ok {
+		_ = json.Unmarshal(raw, &allow)
+	}
+	var deny []string
+	if raw, ok := permsMap["deny"]; ok {
+		_ = json.Unmarshal(raw, &deny)
 	}
 
 	prefix := mcpPermPrefix(serverName)
 
 	// Remove all existing entries for this server from allow
-	filtered := make([]string, 0, len(perms.Allow))
-	for _, entry := range perms.Allow {
+	filtered := make([]string, 0, len(allow))
+	for _, entry := range allow {
 		if !strings.HasPrefix(entry, prefix) {
 			filtered = append(filtered, entry)
 		}
@@ -396,7 +456,6 @@ func WriteToolPermissions(scope, serverName string, toolNames []string, allToolN
 			}
 		}
 	}
-	perms.Allow = filtered
 
 	// Build a set of selected tools for deny cleanup
 	selectedSet := make(map[string]bool, len(toolNames))
@@ -405,8 +464,8 @@ func WriteToolPermissions(scope, serverName string, toolNames []string, allToolN
 	}
 
 	// Remove deselected tools from deny to avoid conflicts
-	filteredDeny := make([]string, 0, len(perms.Deny))
-	for _, entry := range perms.Deny {
+	filteredDeny := make([]string, 0, len(deny))
+	for _, entry := range deny {
 		if strings.HasPrefix(entry, prefix) {
 			toolName := strings.TrimPrefix(entry, prefix)
 			// Keep deny entries for tools that are NOT in the selected set
@@ -417,10 +476,22 @@ func WriteToolPermissions(scope, serverName string, toolNames []string, allToolN
 		}
 		filteredDeny = append(filteredDeny, entry)
 	}
-	perms.Deny = filteredDeny
 
-	// Marshal permissions back
-	permsJSON, err := json.Marshal(perms)
+	// Write allow and deny back into the permissions map, preserving other keys.
+	allowJSON, err := json.Marshal(filtered)
+	if err != nil {
+		return "", fmt.Errorf("marshalling allow: %w", err)
+	}
+	permsMap["allow"] = allowJSON
+
+	denyJSON, err := json.Marshal(filteredDeny)
+	if err != nil {
+		return "", fmt.Errorf("marshalling deny: %w", err)
+	}
+	permsMap["deny"] = denyJSON
+
+	// Marshal the full permissions map back (preserves "ask", "defaultMode", etc.)
+	permsJSON, err := json.Marshal(permsMap)
 	if err != nil {
 		return "", fmt.Errorf("marshalling permissions: %w", err)
 	}
