@@ -201,43 +201,23 @@ func WriteMcpServers(scope string, servers ServerMap, toRemove []string) (string
 	return path, nil
 }
 
-// ReadDisabledMcpServers reads the disabledMcpServers list from ~/.claude.json
-// for the current working directory: .projects[cwd].disabledMcpServers
+// ReadDisabledMcpServers reads the disabledMcpjsonServers list from the
+// project's .claude/settings.local.json. Claude Code uses this key to
+// disable servers defined in .mcp.json files (including inherited ones
+// from parent directories).
 func ReadDisabledMcpServers() []string {
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".claude.json")
+	path := SettingsPath("project")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil
 	}
 
-	// Level 1: top-level keys
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		return nil
-	}
-	projectsRaw, ok := top["projects"]
-	if !ok {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil
 	}
 
-	// Level 2: projects map
-	var projects map[string]json.RawMessage
-	if err := json.Unmarshal(projectsRaw, &projects); err != nil {
-		return nil
-	}
-	cwd := canonicalCwd()
-	projRaw, ok := projects[cwd]
-	if !ok {
-		return nil
-	}
-
-	// Level 3: project entry
-	var projEntry map[string]json.RawMessage
-	if err := json.Unmarshal(projRaw, &projEntry); err != nil {
-		return nil
-	}
-	disabledRaw, ok := projEntry["disabledMcpServers"]
+	disabledRaw, ok := raw["disabledMcpjsonServers"]
 	if !ok {
 		return nil
 	}
@@ -249,71 +229,42 @@ func ReadDisabledMcpServers() []string {
 	return disabled
 }
 
-// WriteDisabledMcpServers writes the disabledMcpServers list into ~/.claude.json
-// under .projects[cwd]. All other keys at every level are preserved.
-// If disabled is empty, the disabledMcpServers key is removed.
+// WriteDisabledMcpServers writes the disabledMcpjsonServers list into the
+// project's .claude/settings.local.json. All other keys are preserved.
+// If disabled is empty, the disabledMcpjsonServers key is removed.
 func WriteDisabledMcpServers(disabled []string) error {
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".claude.json")
+	path := SettingsPath("project")
 
-	// Level 1: read top-level
-	var top map[string]json.RawMessage
+	// Read existing file to preserve all other keys
+	var data map[string]json.RawMessage
 	if content, err := os.ReadFile(path); err == nil {
-		if err := json.Unmarshal(content, &top); err != nil {
-			top = make(map[string]json.RawMessage)
+		if err := json.Unmarshal(content, &data); err != nil {
+			data = make(map[string]json.RawMessage)
 		}
 	} else {
-		top = make(map[string]json.RawMessage)
+		data = make(map[string]json.RawMessage)
 	}
 
-	// Level 2: read projects
-	var projects map[string]json.RawMessage
-	if raw, ok := top["projects"]; ok {
-		if err := json.Unmarshal(raw, &projects); err != nil {
-			projects = make(map[string]json.RawMessage)
-		}
-	} else {
-		projects = make(map[string]json.RawMessage)
-	}
-
-	// Level 3: read project entry
-	cwd := canonicalCwd()
-	var projEntry map[string]json.RawMessage
-	if raw, ok := projects[cwd]; ok {
-		if err := json.Unmarshal(raw, &projEntry); err != nil {
-			projEntry = make(map[string]json.RawMessage)
-		}
-	} else {
-		projEntry = make(map[string]json.RawMessage)
-	}
-
-	// Set or remove disabledMcpServers
+	// Set or remove disabledMcpjsonServers
 	if len(disabled) == 0 {
-		delete(projEntry, "disabledMcpServers")
+		delete(data, "disabledMcpjsonServers")
 	} else {
 		disabledJSON, err := json.Marshal(disabled)
 		if err != nil {
-			return fmt.Errorf("marshalling disabledMcpServers: %w", err)
+			return fmt.Errorf("marshalling disabledMcpjsonServers: %w", err)
 		}
-		projEntry["disabledMcpServers"] = disabledJSON
+		data["disabledMcpjsonServers"] = disabledJSON
 	}
 
-	// Write back level 3 -> 2 -> 1
-	projJSON, err := json.Marshal(projEntry)
-	if err != nil {
-		return fmt.Errorf("marshalling project entry: %w", err)
+	// Write the file, creating parent directory if needed
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating directory %s: %w", dir, err)
 	}
-	projects[cwd] = projJSON
 
-	projectsJSON, err := json.Marshal(projects)
+	output, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshalling projects: %w", err)
-	}
-	top["projects"] = projectsJSON
-
-	output, err := json.MarshalIndent(top, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshalling claude.json: %w", err)
+		return fmt.Errorf("marshalling settings: %w", err)
 	}
 	output = append(output, '\n')
 

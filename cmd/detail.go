@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/rhuss/cc-setup/internal/config"
-	"github.com/rhuss/cc-setup/internal/display"
+	"github.com/cc-deck/cc-setup/internal/config"
+	"github.com/cc-deck/cc-setup/internal/display"
 )
 
 // detailAction represents the action chosen from the detail view.

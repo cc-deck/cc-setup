@@ -19,7 +19,9 @@ var rootCmd = &cobra.Command{
 	Long: `Interactive CLI to manage MCP servers and plugins per project in Claude Code.
 Define all your servers once in a central config, then cherry-pick which ones
 to enable for each project. Enable or disable plugins per scope. This keeps
-Claude's context clean by loading only the tools you actually need.`,
+Claude's context clean by loading only the tools you actually need.
+
+Central server config: ~/.config/cc-setup/mcp.json (or $XDG_CONFIG_HOME/cc-setup/mcp.json)`,
 	// Default: interactive management hub
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runManage()
