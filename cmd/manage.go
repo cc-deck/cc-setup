@@ -12,9 +12,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/rhuss/cc-setup/internal/config"
-	"github.com/rhuss/cc-setup/internal/display"
-	mcpclient "github.com/rhuss/cc-setup/internal/mcp"
+	"github.com/cc-deck/cc-setup/internal/config"
+	"github.com/cc-deck/cc-setup/internal/display"
+	mcpclient "github.com/cc-deck/cc-setup/internal/mcp"
 )
 
 // manageAction represents the action chosen from the server list.
@@ -295,7 +295,7 @@ type manageModel struct {
 // loadCheckedState reads the Claude config for the given scope and returns
 // a map of server names to whether they are enabled.
 // In project scope, inherited servers are also marked as checked, and
-// servers listed in disabledMcpServers are marked unchecked.
+// servers listed in disabledMcpjsonServers are marked unchecked.
 func loadCheckedState(servers config.ServerMap, scope string, inherited map[string]string) map[string]bool {
 	existing := config.ReadMcpServers(scope)
 	checked := make(map[string]bool, len(servers))
@@ -849,7 +849,7 @@ func (m manageModel) confirmQuitView() string {
 	return b.String()
 }
 
-// computeNewDisabledList builds the new disabledMcpServers list.
+// computeNewDisabledList builds the new disabledMcpjsonServers list.
 // It preserves disabled entries for servers not in the central config (we don't manage those),
 // adds unchecked inherited servers to the disabled list, and skips non-inherited unchecked
 // servers (those are simply absent from .mcp.json).
@@ -879,7 +879,7 @@ func computeNewDisabledList(servers config.ServerMap, checked map[string]bool, i
 // runSave computes adds/removes vs the current Claude config, shows a summary,
 // confirms, and writes to the scope's config file. Inherited servers that are
 // checked are not written redundantly to local .mcp.json; unchecked inherited
-// servers are added to disabledMcpServers.
+// servers are added to disabledMcpjsonServers.
 func runSave(servers config.ServerMap, checked map[string]bool, scope string, inherited map[string]string) error {
 	existing := config.ReadMcpServers(scope)
 
@@ -962,11 +962,11 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string, in
 		return fmt.Errorf("failed to write config: %w", err)
 	}
 
-	// In project scope, also update disabledMcpServers in ~/.claude.json
+	// In project scope, also update disabledMcpjsonServers in settings.local.json
 	if scope == "project" {
 		newDisabled := computeNewDisabledList(servers, checked, inherited)
 		if err := config.WriteDisabledMcpServers(newDisabled); err != nil {
-			return fmt.Errorf("failed to write disabledMcpServers: %w", err)
+			return fmt.Errorf("failed to write disabledMcpjsonServers: %w", err)
 		}
 	}
 
@@ -1217,12 +1217,12 @@ func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginCheck
 		fmt.Printf("  Written to %s\n", path)
 		saved = true
 	}
-	// In project scope, always update disabledMcpServers in ~/.claude.json
+	// In project scope, always update disabledMcpjsonServers in settings.local.json
 	// (handles inherited servers that were disabled)
 	if scope == "project" {
 		newDisabled := computeNewDisabledList(servers, checked, inherited)
 		if err := config.WriteDisabledMcpServers(newDisabled); err != nil {
-			return fmt.Errorf("failed to write disabledMcpServers: %w", err)
+			return fmt.Errorf("failed to write disabledMcpjsonServers: %w", err)
 		}
 	}
 

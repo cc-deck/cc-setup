@@ -12,9 +12,9 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/rhuss/cc-setup/internal/config"
-	"github.com/rhuss/cc-setup/internal/display"
-	mcpclient "github.com/rhuss/cc-setup/internal/mcp"
+	"github.com/cc-deck/cc-setup/internal/config"
+	"github.com/cc-deck/cc-setup/internal/display"
+	mcpclient "github.com/cc-deck/cc-setup/internal/mcp"
 )
 
 // toolCache caches discovered tools per server name across invocations within
