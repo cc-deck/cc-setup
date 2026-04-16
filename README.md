@@ -1,6 +1,6 @@
 # cc-setup
 
-Interactive CLI to manage which MCP servers and plugins are active per project in [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Interactive CLI to manage MCP servers, plugins, and permissions per project in [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
 ![cc-setup demo](docs/demo.gif)
 
@@ -10,13 +10,15 @@ Every MCP server you enable adds its tools to Claude's context. Every plugin add
 
 The practical effect is real. An MCP server with 20 tools that you only need in one project still consumes context in every other project. Skills from plugins you forgot you enabled compete with the ones you actually want triggered. The model does its best, but giving it a focused toolset for each project produces better results than dumping everything in globally.
 
-`cc-setup` solves this by letting you define all your servers and plugins once in a central registry, then selectively enable only the ones each project needs. A Kubernetes project gets your cluster tools. A documentation project gets your writing tools. Nothing more.
+`cc-setup` solves this by letting you define all your servers and plugins once in a central registry, then selectively enable only the ones each project needs. A Kubernetes project gets your cluster tools. A documentation project gets your writing tools. Nothing more. The Permissions tab takes this further by letting you control exactly which tools Claude can auto-approve, with profile presets for common workflows like research-only or full autonomy.
 
 ## Features
 
 - **Central server registry** with per-project activation via checkbox selection
 - **Inherited server detection** from parent directory `.mcp.json` files, with visual distinction
 - **Real-time health checks** with colored status indicators (green = OK, yellow = auth required, red = unreachable)
+- **Permissions management** with three-state controls (allow/deny/ask), profiles, and MCP tool classification
+- **Permission profiles** for quick setup (Read-only YOLO, Full YOLO) with MCP tool auto-classification
 - **Tool permissions management** to control which tools are auto-approved per server
 - **OAuth credential reuse** from Claude Code's stored tokens, with automatic refresh
 - **Dual scope support** for project-local (`.mcp.json`) and user-global (`~/.claude.json`) configs
@@ -140,7 +142,7 @@ Opens a full-screen TUI with all your registered servers. Each server shows a he
 | `p` | Switch to project scope |
 | `u` | Switch to user scope |
 | `.` | Toggle between project/user scope |
-| `tab` | Switch between MCP Servers and Plugins tabs |
+| `tab` | Switch between MCP Servers, Plugins, and Permissions tabs |
 | `/` | Filter servers |
 | `q` / `esc` | Quit |
 
@@ -245,6 +247,89 @@ Installing, updating, and removing plugins is still handled by Claude Code itsel
 
 **Why this matters:** Plugins add skills to Claude's context. A plugin with 20 skills that you only need for one type of project still competes for attention in every other project. Disabling irrelevant plugins per project keeps skill selection focused.
 
+## Permission management
+
+The Permissions tab (press `tab` twice to reach it) provides a unified view of all Claude Code permissions across built-in tools, bash patterns, and MCP tools. It supports three-state controls, profile presets, and scope-aware inherited permissions.
+
+### Three-state permissions
+
+Each permission has three states, cycled with `space`:
+
+| State | Display | Meaning |
+|-------|---------|---------|
+| `[+]` | Green | **Allow**: auto-approved, no prompt |
+| `[-]` | Red | **Deny**: auto-rejected, Claude won't try |
+| `[ ]` | Dim | **Ask**: Claude prompts interactively each time |
+
+All 11 built-in Claude Code tools (Agent, Bash, Edit, Glob, Grep, Read, Skill, ToolSearch, WebFetch, WebSearch, Write) are always visible in the list regardless of their state.
+
+### Permission mode
+
+Press `m` to set the Claude Code permission mode:
+
+| Mode | Behavior |
+|------|----------|
+| `default` | Ask for everything not explicitly allowed |
+| `acceptEdits` | Auto-approve file edits, ask for the rest |
+| `auto` | AI classifier decides what to approve |
+| `bypassPermissions` | Skip ALL permission checks |
+
+When `bypassPermissions` is active, all individual permissions are dimmed (they're meaningless since everything is auto-approved) and toggling is disabled. The saved state is preserved and restored when switching back to a normal mode.
+
+### Profiles
+
+Press `p` to apply a permission preset:
+
+- **Read-only YOLO**: Non-destructive tools only (Read, Glob, Grep, WebFetch, WebSearch, Agent, Skill, ToolSearch), safe bash patterns, and read-only MCP tools auto-classified from all configured servers. Mode set to `acceptEdits`.
+- **Full YOLO**: All tools enabled, all bash commands, all MCP tools from all servers. Mode set to `bypassPermissions`.
+- **None**: Clear all permissions and reset mode to `default`.
+
+Profiles discover and classify MCP tools from all configured servers using annotations (ReadOnlyHint, DestructiveHint) when available, falling back to name-based heuristics (safe prefixes like `list`, `get`, `read` vs unsafe prefixes like `delete`, `write`, `execute`).
+
+Custom profiles can be placed as YAML files in `~/.config/cc-setup/profiles/`.
+
+### Adding permissions
+
+Press `a` to add permissions with a guided flow:
+
+- **Built-in tool**: Select from the complete list
+- **Bash pattern**: Choose from common presets or enter a custom pattern
+- **MCP tool**: Select a server, then choose a selection strategy:
+  - All tools (wildcard)
+  - Read-only tools (auto-classified, with count shown)
+  - Pick individual tools (multi-select with checkboxes)
+
+### Scope and inheritance
+
+Permissions follow the same scope model as servers and plugins:
+
+- **User scope** (`~/.claude/settings.local.json`): Global defaults
+- **Project scope** (`.claude/settings.local.json`): Project-specific overrides
+
+In project scope, user-scope permissions appear as inherited (grey/dimmed). Toggling an inherited permission creates a project-level override.
+
+### Auto-consolidation
+
+On save, redundant entries are automatically cleaned up:
+
+- Comment-only bash entries (`Bash(# ...)`) removed
+- Duplicates removed
+- Specific patterns subsumed by wildcards removed (e.g., `Bash(git:*)` when `Bash` or `Bash(*)` exists)
+- Specific MCP tool entries removed when a server wildcard (`mcp__server__*`) exists
+
+**Key bindings (Permissions tab):**
+
+| Key | Action |
+|-----|--------|
+| `space` | Cycle permission state: ask -> allow -> deny -> ask |
+| `a` | Add a new permission (guided flow) |
+| `d` | Delete permission (built-in tools reset to ask) |
+| `p` | Apply a profile preset |
+| `m` | Change permission mode |
+| `s` | Save permissions to disk |
+| `.` | Toggle between project/user scope |
+| `/` | Filter permissions |
+
 ## Server types
 
 The tool supports all Claude Code MCP transport types:
@@ -318,8 +403,11 @@ This means you can use `cc-setup` alongside manually configured servers without 
 | File | Purpose |
 |------|---------|
 | `~/.config/cc-setup/mcp.json` | Central server registry |
+| `~/.config/cc-setup/profiles/` | Permission profiles (YAML files, underscore-prefixed are built-in) |
 | `~/.claude.json` | Claude Code user-global config |
 | `.mcp.json` | Claude Code project-local config (also read from parent directories for inheritance) |
-| `~/.claude/settings.local.json` | User-scoped tool permissions |
-| `.claude/settings.local.json` | Project-scoped tool permissions and `disabledMcpjsonServers` |
+| `~/.claude/settings.local.json` | User-scoped permissions (`permissions.allow`, `permissions.deny`) |
+| `~/.claude/settings.json` | User-scoped permission mode (`permissions.defaultMode`) and enabled plugins |
+| `.claude/settings.local.json` | Project-scoped permissions and `disabledMcpjsonServers` |
+| `.claude/settings.json` | Project-scoped permission mode and plugin overrides |
 | `~/.claude/.credentials.json` | Claude Code's OAuth tokens (read-only by this tool, except for token refresh write-back) |
