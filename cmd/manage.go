@@ -38,6 +38,7 @@ type manageTab int
 const (
 	tabServers manageTab = iota
 	tabPlugins
+	tabPermissions
 )
 
 // serverItem implements list.Item for the bubbles list.
@@ -286,10 +287,23 @@ type manageModel struct {
 	pluginChecked  map[string]bool
 	pluginWidthPtr *int
 
+	// Permissions tab state
+	permList           list.Model
+	permKeys           permissionsKeyMap
+	permStates         map[string]permState  // key -> permAllow/permDeny/permAsk
+	permSources        map[string]string
+	permHints          map[string]string     // key -> "[read-only]", "[destructive]", "[heuristic]"
+	permMode           string
+	permModePtr        *string               // shared with delegate for bypass dimming
+	permAction         permAction
+	permInitialStates  map[string]permState
+	permInitialMode    string
+
 	// Quit confirmation state
 	confirmQuit          bool
 	pendingServerChanges []pendingChange
 	pendingPluginChanges []pendingChange
+	pendingPermChanges   []pendingChange
 }
 
 // loadCheckedState reads the Claude config for the given scope and returns
@@ -360,16 +374,23 @@ func tabbedBanner(scope string, tab manageTab, width int) string {
 		Padding(0, 1)
 
 	// Left side: tab selector
-	var serversRendered, pluginsRendered string
-	if tab == tabServers {
+	var serversRendered, pluginsRendered, permsRendered string
+	switch tab {
+	case tabServers:
 		serversRendered = tabPill.Render("MCP Servers")
 		pluginsRendered = inactive.Render("Plugins")
-	} else {
+		permsRendered = inactive.Render("Permissions")
+	case tabPlugins:
 		serversRendered = inactive.Render("MCP Servers")
 		pluginsRendered = tabPill.Render("Plugins")
+		permsRendered = inactive.Render("Permissions")
+	case tabPermissions:
+		serversRendered = inactive.Render("MCP Servers")
+		pluginsRendered = inactive.Render("Plugins")
+		permsRendered = tabPill.Render("Permissions")
 	}
 	sep := inactive.Render("  ")
-	tabPart := inactive.Render(" ") + serversRendered + sep + pluginsRendered
+	tabPart := inactive.Render(" ") + serversRendered + sep + pluginsRendered + sep + permsRendered
 
 	// Right side: scope selector
 	var projectRendered, userRendered string
@@ -384,9 +405,12 @@ func tabbedBanner(scope string, tab manageTab, width int) string {
 
 	// Center: file path (dimmed)
 	var path string
-	if tab == tabServers {
+	switch tab {
+	case tabServers:
 		path = config.ConfigPath(scope)
-	} else {
+	case tabPermissions:
+		path = config.SettingsPath(scope)
+	default:
 		path = config.PluginSettingsPath(scope)
 	}
 	pathStyle := lipgloss.NewStyle().
@@ -485,20 +509,57 @@ func newManageModel(servers config.ServerMap, scope string, checked map[string]b
 		return []key.Binding{pKeys.Toggle, pKeys.ToggleAll, pKeys.Save, keys.ScopeProject, keys.ScopeUser, tabKey}
 	}
 
+	// Build permissions list
+	permItems, permStatesMap, permSources := buildPermissionItems(scope)
+	permKeys := newPermissionsKeyMap()
+	permModePtr := new(string) // set after permMode is read
+	permDelegate := permissionCheckboxDelegate{states: permStatesMap, sources: permSources, width: pluginWidthPtr, mode: permModePtr}
+
+	permL := list.New(permItems, permDelegate, 0, 0)
+	permL.SetShowTitle(false)
+	permL.SetShowStatusBar(false)
+	permL.Filter = nameFirstFilter
+	permL.SetFilteringEnabled(true)
+	permL.DisableQuitKeybindings()
+
+	permL.AdditionalShortHelpKeys = func() []key.Binding {
+		return []key.Binding{permKeys.Toggle, permKeys.Add, permKeys.Delete, permKeys.Profile, permKeys.Mode, permKeys.Save, tabKey}
+	}
+
+	permMode := config.ReadPermissionMode(scope)
+
+	// Set mode on pointer so delegate can dim entries when bypassed
+	*permModePtr = permMode
+
+	// Snapshot initial perm state for dirty checking
+	permInitialStates := make(map[string]permState, len(permStatesMap))
+	for k, v := range permStatesMap {
+		permInitialStates[k] = v
+	}
+
 	return manageModel{
-		list:           l,
-		keys:           keys,
-		checked:        checked,
-		health:         health,
-		scope:          scope,
-		servers:        servers,
-		inherited:      inherited,
-		tab:            tab,
-		pluginList:     pl,
-		pluginKeys:     pKeys,
-		plugins:        plugins,
-		pluginChecked:  pluginChecked,
-		pluginWidthPtr: pluginWidthPtr,
+		list:              l,
+		keys:              keys,
+		checked:           checked,
+		health:            health,
+		scope:             scope,
+		servers:           servers,
+		inherited:         inherited,
+		tab:               tab,
+		pluginList:        pl,
+		pluginKeys:        pKeys,
+		plugins:           plugins,
+		pluginChecked:     pluginChecked,
+		pluginWidthPtr:    pluginWidthPtr,
+		permList:          permL,
+		permKeys:          permKeys,
+		permStates:        permStatesMap,
+		permSources:       permSources,
+		permHints:         make(map[string]string),
+		permMode:          permMode,
+		permModePtr:       permModePtr,
+		permInitialStates: permInitialStates,
+		permInitialMode:   permMode,
 	}
 }
 
@@ -537,6 +598,8 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.list.SetSize(msg.Width, msg.Height-bannerHeight)
 		m.pluginList.SetSize(msg.Width, msg.Height-bannerHeight)
+		// Permissions list needs extra line for mode display
+		m.permList.SetSize(msg.Width, msg.Height-bannerHeight-1)
 		if m.pluginWidthPtr != nil {
 			*m.pluginWidthPtr = msg.Width
 		}
@@ -571,29 +634,35 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Tab switching
 		if key.Matches(msg, tabKey) {
-			if m.tab == tabServers {
+			switch m.tab {
+			case tabServers:
 				m.tab = tabPlugins
-			} else {
+			case tabPlugins:
+				m.tab = tabPermissions
+			case tabPermissions:
 				m.tab = tabServers
 			}
 			return m, nil
 		}
 
-		// Scope switching (shared between tabs)
+		// Scope switching (shared between tabs, but permissions tab
+		// uses `p` for profile picker so we skip ScopeProject there)
 		switch {
 		case key.Matches(msg, m.keys.ScopeProject):
+			// In permissions tab, `p` is used for profile picker, not scope
+			if m.tab == tabPermissions {
+				break
+			}
 			if m.scope != "project" {
 				m.scope = "project"
-				m.reloadCheckedState()
-				m.reloadPluginCheckedState()
+				m.reloadForScope()
 			}
 			return m, nil
 
 		case key.Matches(msg, m.keys.ScopeUser):
 			if m.scope != "user" {
 				m.scope = "user"
-				m.reloadCheckedState()
-				m.reloadPluginCheckedState()
+				m.reloadForScope()
 			}
 			return m, nil
 
@@ -603,8 +672,7 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.scope = "project"
 			}
-			m.reloadCheckedState()
-			m.reloadPluginCheckedState()
+			m.reloadForScope()
 			return m, nil
 		}
 
@@ -612,10 +680,12 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key.Matches(msg, m.keys.Quit) {
 			serverChanges := m.computeServerChanges()
 			pluginChanges := m.computePluginChanges()
-			if len(serverChanges) > 0 || len(pluginChanges) > 0 {
+			permChanges := m.computePermChanges()
+			if len(serverChanges) > 0 || len(pluginChanges) > 0 || len(permChanges) > 0 {
 				m.confirmQuit = true
 				m.pendingServerChanges = serverChanges
 				m.pendingPluginChanges = pluginChanges
+				m.pendingPermChanges = permChanges
 				return m, nil
 			}
 			m.action = actionQuit
@@ -623,6 +693,15 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Tab-specific key handling
+		if m.tab == tabPermissions {
+			// Skip filter state check (handled inside updatePermissionsTab)
+			if m.permList.FilterState() == list.Filtering {
+				var cmd tea.Cmd
+				m.permList, cmd = m.permList.Update(msg)
+				return m, cmd
+			}
+			return updatePermissionsTab(&m, msg)
+		}
 		if m.tab == tabPlugins {
 			return m.updatePluginTab(msg)
 		}
@@ -663,14 +742,20 @@ func (m manageModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.tab == tabPlugins {
+	switch m.tab {
+	case tabPlugins:
 		var cmd tea.Cmd
 		m.pluginList, cmd = m.pluginList.Update(msg)
 		return m, cmd
+	case tabPermissions:
+		var cmd tea.Cmd
+		m.permList, cmd = m.permList.Update(msg)
+		return m, cmd
+	default:
+		var cmd tea.Cmd
+		m.list, cmd = m.list.Update(msg)
+		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.list, cmd = m.list.Update(msg)
-	return m, cmd
 }
 
 // updatePluginTab handles key events when the plugins tab is active.
@@ -703,6 +788,13 @@ func (m manageModel) updatePluginTab(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.pluginList, cmd = m.pluginList.Update(msg)
 	return m, cmd
+}
+
+// reloadForScope reloads all tab state for the current scope.
+func (m *manageModel) reloadForScope() {
+	m.reloadCheckedState()
+	m.reloadPluginCheckedState()
+	m.reloadPermissions()
 }
 
 // reloadCheckedState clears the checked map and refills it from the current scope's
@@ -799,10 +891,14 @@ func (m manageModel) View() string {
 	if m.confirmQuit {
 		return banner + "\n" + m.confirmQuitView()
 	}
-	if m.tab == tabPlugins {
+	switch m.tab {
+	case tabPlugins:
 		return banner + "\n" + m.pluginList.View()
+	case tabPermissions:
+		return banner + "\n" + permissionsView(&m)
+	default:
+		return banner + "\n" + m.list.View()
 	}
-	return banner + "\n" + m.list.View()
 }
 
 // confirmQuitView renders the unsaved changes summary and action options.
@@ -840,6 +936,20 @@ func (m manageModel) confirmQuitView() string {
 				b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ enable "), c.name))
 			} else {
 				b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- disable"), c.name))
+			}
+		}
+	}
+
+	if len(m.pendingPermChanges) > 0 {
+		b.WriteString("\n  " + bold.Render("Permissions") + "\n")
+		for _, c := range m.pendingPermChanges {
+			switch c.action {
+			case "add":
+				b.WriteString(fmt.Sprintf("    %s %s\n", green.Render("+ add    "), c.name))
+			case "remove":
+				b.WriteString(fmt.Sprintf("    %s %s\n", red.Render("- remove "), c.name))
+			case "change":
+				b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("~ change "), c.name))
 			}
 		}
 	}
@@ -1000,6 +1110,11 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string, in
 func runManage() error {
 	scope := "project"
 	tab := tabServers
+	permModeOverride := "" // persists permission mode across TUI re-entries
+	permModeSet := false
+
+	// Ensure built-in profiles are on disk
+	_ = config.EnsureBuiltinProfiles()
 
 	for {
 		servers, err := config.LoadServers()
@@ -1040,6 +1155,16 @@ func runManage() error {
 		)
 
 		m := newManageModel(servers, scope, checked, inherited, plugins, pluginEffective, tab)
+
+		// Apply persisted permission mode override from inline mode selector
+		if permModeSet {
+			m.permMode = permModeOverride
+			m.permInitialMode = permModeOverride
+			if m.permModePtr != nil {
+				*m.permModePtr = permModeOverride
+			}
+		}
+
 		p := tea.NewProgram(m, tea.WithAltScreen())
 		result, err := p.Run()
 		if err != nil {
@@ -1053,6 +1178,103 @@ func runManage() error {
 		// Clear screen after leaving alt screen so inline forms start clean
 		if final.action != actionQuit && final.action != actionNone {
 			fmt.Print("\033[2J\033[H")
+		}
+		if final.tab == tabPermissions && final.permAction != permActionNone {
+			fmt.Print("\033[2J\033[H")
+		}
+
+		// Handle permission actions first (they use their own action enum)
+		if final.tab == tabPermissions {
+			switch final.permAction {
+			case permActionSave:
+				if err := runSavePermissions(final.permStates, final.permSources, final.permMode, final.scope); err != nil {
+					return err
+				}
+				permModeOverride = ""
+				permModeSet = false
+				continue
+
+			case permActionMode:
+				newMode, err := runModeSelector(final.permMode)
+				if err != nil && err != errCancelled {
+					return err
+				}
+				if err == nil {
+					permModeOverride = newMode
+					permModeSet = true
+				}
+				continue
+
+			case permActionProfile:
+				// Check for custom changes that would be lost
+				customCount := countCustomChanges(final.permSources)
+				if customCount > 0 {
+					confirmed, err := runProfileConfirmation(customCount)
+					if err != nil && err != errCancelled {
+						return err
+					}
+					if !confirmed {
+						continue
+					}
+				}
+
+				profileName, selected, err := runProfileSelector()
+				if err != nil && err != errCancelled {
+					return err
+				}
+				if !selected {
+					continue
+				}
+
+				if err := applyProfile(&final, profileName); err != nil {
+					fmt.Printf("  %s %v\n", display.StyleRed.Render("Error:"), err)
+					continue
+				}
+				// Write profile permissions and mode to disk so they persist
+				// when the TUI re-creates from disk state.
+				if err := runSavePermissions(final.permStates, final.permSources, final.permMode, final.scope); err != nil {
+					fmt.Printf("  %s %v\n", display.StyleRed.Render("Error saving:"), err)
+				}
+				permModeOverride = ""
+				permModeSet = false
+				continue
+
+			case permActionAdd:
+				permKeys, err := runAddPermission(final.scope)
+				if err != nil && err != errCancelled {
+					return err
+				}
+				if len(permKeys) > 0 {
+					// Write new permissions to disk immediately so they
+					// persist when the TUI re-creates from disk state.
+					existing := config.ReadAllPermissions(final.scope)
+					existingSet := make(map[string]bool, len(existing))
+					for _, p := range existing {
+						existingSet[p] = true
+					}
+
+					var added []string
+					for _, key := range permKeys {
+						if !existingSet[key] {
+							existing = append(existing, key)
+							added = append(added, key)
+						}
+					}
+
+					if len(added) > 0 {
+						if _, err := config.WriteAllPermissions(final.scope, existing); err != nil {
+							fmt.Printf("  %s %v\n", display.StyleRed.Render("Error:"), err)
+						} else {
+							fmt.Printf("  %s %d permission(s) added\n",
+								display.StyleGreen.Render("Added:"), len(added))
+						}
+					} else {
+						fmt.Printf("  %s all permissions already exist\n",
+							display.StyleYellow.Render("Skipped:"))
+					}
+				}
+				continue
+			}
 		}
 
 		switch final.action {
@@ -1095,7 +1317,7 @@ func runManage() error {
 			}
 
 		case actionSaveAll:
-			if err := applySaveAll(final.servers, final.checked, final.pluginChecked, final.scope, final.inherited); err != nil {
+			if err := applySaveAll(final.servers, final.checked, final.pluginChecked, final.permStates, final.permSources, final.permMode, final.scope, final.inherited); err != nil {
 				return err
 			}
 			return nil
@@ -1172,7 +1394,7 @@ func runSavePlugins(checked map[string]bool, scope string) error {
 
 // applySaveAll saves both server and plugin changes without additional confirmation.
 // Used when the user confirms from the quit dialog.
-func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginChecked map[string]bool, scope string, inherited map[string]string) error {
+func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginChecked map[string]bool, permStates map[string]permState, permSources map[string]string, permMode string, scope string, inherited map[string]string) error {
 	saved := false
 
 	// Save server changes
@@ -1245,6 +1467,21 @@ func applySaveAll(servers config.ServerMap, checked map[string]bool, pluginCheck
 		}
 		fmt.Printf("  %s plugin settings updated\n", display.StyleGreen.Render("Saved:"))
 		fmt.Printf("  Written to %s\n", path)
+		saved = true
+	}
+
+	// Save permission changes (if there are non-inherited entries or mode changed)
+	hasOwnPerms := false
+	for k, state := range permStates {
+		if permSources[k] != "inherited" && state != permAsk {
+			hasOwnPerms = true
+			break
+		}
+	}
+	if hasOwnPerms || permMode != "" {
+		if err := runSavePermissions(permStates, permSources, permMode, scope); err != nil {
+			return fmt.Errorf("failed to save permissions: %w", err)
+		}
 		saved = true
 	}
 

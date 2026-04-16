@@ -300,6 +300,214 @@ func SettingsPath(scope string) string {
 	return filepath.Join(canonicalCwd(), ".claude", settingsFileName)
 }
 
+// ReadAllPermissions reads the full permissions.allow array from settings.local.json
+// for the given scope. Unlike ReadToolPermissions, this returns all entries
+// (built-in tools, bash patterns, and MCP tools) without filtering.
+func ReadAllPermissions(scope string) []string {
+	path := SettingsPath(scope)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	permsRaw, ok := raw["permissions"]
+	if !ok {
+		return nil
+	}
+
+	var perms struct {
+		Allow []string `json:"allow"`
+	}
+	if err := json.Unmarshal(permsRaw, &perms); err != nil {
+		return nil
+	}
+	return perms.Allow
+}
+
+// ReadDenyPermissions reads the full permissions.deny array from settings.local.json.
+func ReadDenyPermissions(scope string) []string {
+	path := SettingsPath(scope)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+
+	permsRaw, ok := raw["permissions"]
+	if !ok {
+		return nil
+	}
+
+	var perms struct {
+		Deny []string `json:"deny"`
+	}
+	if err := json.Unmarshal(permsRaw, &perms); err != nil {
+		return nil
+	}
+	return perms.Deny
+}
+
+// WriteAllPermissions replaces the full permissions.allow and permissions.deny arrays
+// in settings.local.json for the given scope, preserving all other keys.
+// Returns the written file path.
+func WriteAllPermissions(scope string, permissions []string, denied ...[]string) (string, error) {
+	path := SettingsPath(scope)
+
+	var data map[string]json.RawMessage
+	if content, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(content, &data); err != nil {
+			data = make(map[string]json.RawMessage)
+		}
+	} else {
+		data = make(map[string]json.RawMessage)
+	}
+
+	// Parse existing permissions map to preserve other keys (deny, ask, etc.)
+	permsMap := make(map[string]json.RawMessage)
+	if raw, ok := data["permissions"]; ok {
+		_ = json.Unmarshal(raw, &permsMap)
+	}
+
+	if permissions == nil {
+		permissions = []string{}
+	}
+	allowJSON, err := json.Marshal(permissions)
+	if err != nil {
+		return "", fmt.Errorf("marshalling allow: %w", err)
+	}
+	permsMap["allow"] = allowJSON
+
+	// Write deny array if provided
+	if len(denied) > 0 {
+		denyList := denied[0]
+		if denyList == nil {
+			denyList = []string{}
+		}
+		denyJSON, err := json.Marshal(denyList)
+		if err != nil {
+			return "", fmt.Errorf("marshalling deny: %w", err)
+		}
+		permsMap["deny"] = denyJSON
+	}
+
+	permsJSON, err := json.Marshal(permsMap)
+	if err != nil {
+		return "", fmt.Errorf("marshalling permissions: %w", err)
+	}
+	data["permissions"] = permsJSON
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+
+	output, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshalling settings: %w", err)
+	}
+	output = append(output, '\n')
+
+	if err := os.WriteFile(path, output, 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// ReadPermissionMode reads the permissions.defaultMode from settings.json
+// for the given scope.
+func ReadPermissionMode(scope string) string {
+	path := PluginSettingsPath(scope)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ""
+	}
+
+	permsRaw, ok := raw["permissions"]
+	if !ok {
+		return ""
+	}
+
+	var perms struct {
+		DefaultMode string `json:"defaultMode"`
+	}
+	if err := json.Unmarshal(permsRaw, &perms); err != nil {
+		return ""
+	}
+	return perms.DefaultMode
+}
+
+// WritePermissionMode writes the permissions.defaultMode to settings.json
+// for the given scope, preserving all other keys (enabledPlugins, etc.).
+// Returns the written file path.
+func WritePermissionMode(scope, mode string) (string, error) {
+	path := PluginSettingsPath(scope)
+
+	var data map[string]json.RawMessage
+	if content, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(content, &data); err != nil {
+			data = make(map[string]json.RawMessage)
+		}
+	} else {
+		data = make(map[string]json.RawMessage)
+	}
+
+	// Parse existing permissions map to preserve other keys
+	permsMap := make(map[string]json.RawMessage)
+	if raw, ok := data["permissions"]; ok {
+		_ = json.Unmarshal(raw, &permsMap)
+	}
+
+	if mode == "" {
+		delete(permsMap, "defaultMode")
+	} else {
+		modeJSON, err := json.Marshal(mode)
+		if err != nil {
+			return "", fmt.Errorf("marshalling defaultMode: %w", err)
+		}
+		permsMap["defaultMode"] = modeJSON
+	}
+
+	if len(permsMap) > 0 {
+		permsJSON, err := json.Marshal(permsMap)
+		if err != nil {
+			return "", fmt.Errorf("marshalling permissions: %w", err)
+		}
+		data["permissions"] = permsJSON
+	} else {
+		delete(data, "permissions")
+	}
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating directory %s: %w", dir, err)
+	}
+
+	output, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshalling settings: %w", err)
+	}
+	output = append(output, '\n')
+
+	if err := os.WriteFile(path, output, 0o644); err != nil {
+		return "", fmt.Errorf("writing %s: %w", path, err)
+	}
+	return path, nil
+}
+
 // mcpPermPrefix returns the permission entry prefix for a server,
 // e.g. "mcp__my-server__".
 func mcpPermPrefix(serverName string) string {

@@ -30,6 +30,11 @@ var (
 	StyleHealthError   = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))           // red
 	StyleHealthUnknown = lipgloss.NewStyle().Faint(true)                               // dim
 
+	// Permission source styles.
+	StylePermCustom    = lipgloss.NewStyle().Foreground(lipgloss.Color("#d97706"))     // amber for custom
+	StylePermProfile   = lipgloss.NewStyle().Foreground(lipgloss.Color("#0e7490"))     // teal for profile
+	StylePermInherited = lipgloss.NewStyle().Faint(true)                               // dimmed for inherited
+
 )
 
 // TermWidth returns the current terminal width, defaulting to 80 if detection fails.
