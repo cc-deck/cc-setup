@@ -10,6 +10,7 @@ require (
 	github.com/charmbracelet/x/term v0.2.1
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/spf13/cobra v1.10.2
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
