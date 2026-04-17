@@ -816,38 +816,52 @@ func applyProfile(m *manageModel, profileName string) error {
 		m.permSources[key] = "profile"
 	}
 
-	// Discover and classify MCP tools from ALL configured servers.
-	// YOLO profiles apply to all servers, not just currently enabled ones.
-	servers, _ := config.LoadServers()
-	for _, serverName := range config.ServerNames(servers) {
-		// Try cache first, then discover
-		var tools []mcpclient.ToolInfo
-		if cached, ok := toolCache.Load(serverName); ok {
-			tools = cached.([]mcpclient.ToolInfo)
-		} else {
-			fmt.Printf("  Discovering tools for %s...\n", display.StyleCyan.Render(serverName))
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			discovered, err := mcpclient.ListTools(ctx, serverName, servers[serverName])
-			cancel()
-			if err != nil {
-				fmt.Printf("  %s %s: %v (skipping)\n",
-					display.StyleYellow.Render("Warning:"), serverName, err)
-				continue
-			}
-			toolCache.Store(serverName, discovered)
-			tools = discovered
+	// MCP tool handling: if the profile uses a global wildcard include,
+	// just add mcp__* instead of discovering every server's tools individually.
+	hasGlobalWildcard := false
+	for _, pattern := range profile.Permissions.MCP.Include {
+		if pattern == "*" {
+			hasGlobalWildcard = true
+			break
 		}
+	}
 
-		// Classify each tool against the profile's rules
-		for _, tool := range tools {
-			ct := config.ClassifyTool(tool.Name, tool.ReadOnlyHint, tool.DestructiveHint, tool.HasAnnotations, *profile)
-			key := "mcp__" + serverName + "__" + tool.Name
-			if ct.Approved {
-				m.permStates[key] = permAllow
-				m.permSources[key] = "profile"
+	if hasGlobalWildcard {
+		// Global wildcard: one entry covers all servers and tools
+		m.permStates["mcp__*"] = permAllow
+		m.permSources["mcp__*"] = "profile"
+	} else {
+		// Discover and classify MCP tools from all configured servers
+		servers, _ := config.LoadServers()
+		for _, serverName := range config.ServerNames(servers) {
+			var tools []mcpclient.ToolInfo
+			if cached, ok := toolCache.Load(serverName); ok {
+				tools = cached.([]mcpclient.ToolInfo)
+			} else {
+				fmt.Printf("  Discovering tools for %s...\n", display.StyleCyan.Render(serverName))
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				discovered, err := mcpclient.ListTools(ctx, serverName, servers[serverName])
+				cancel()
+				if err != nil {
+					fmt.Printf("  %s %s: %v (skipping)\n",
+						display.StyleYellow.Render("Warning:"), serverName, err)
+					continue
+				}
+				toolCache.Store(serverName, discovered)
+				tools = discovered
 			}
-			if ct.Hint != "" {
-				m.permHints[key] = ct.Hint
+
+			// Classify each tool against the profile's rules
+			for _, tool := range tools {
+				ct := config.ClassifyTool(tool.Name, tool.ReadOnlyHint, tool.DestructiveHint, tool.HasAnnotations, *profile)
+				key := "mcp__" + serverName + "__" + tool.Name
+				if ct.Approved {
+					m.permStates[key] = permAllow
+					m.permSources[key] = "profile"
+				}
+				if ct.Hint != "" {
+					m.permHints[key] = ct.Hint
+				}
 			}
 		}
 	}
