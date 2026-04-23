@@ -631,17 +631,37 @@ func editEnv(name string, servers config.ServerMap, server map[string]any) error
 	return config.SaveServers(servers)
 }
 
+// isMcpRemote returns true when the server definition looks like it uses
+// mcp-remote (npx mcp-remote, npx -y mcp-remote@..., etc.), which may
+// trigger an interactive OAuth browser flow on connect.
+func isMcpRemote(serverDef map[string]any) bool {
+	if rawArgs, ok := serverDef["args"].([]any); ok {
+		for _, a := range rawArgs {
+			if s, ok := a.(string); ok && strings.Contains(s, "mcp-remote") {
+				return true
+			}
+		}
+	}
+	if cmd, _ := serverDef["command"].(string); strings.Contains(cmd, "mcp-remote") {
+		return true
+	}
+	return false
+}
+
 // runAuthenticate connects to the MCP server and returns a status message.
-// For stdio servers (e.g. mcp-remote) this may open a browser for OAuth.
+// Uses a short timeout (15s) for regular servers and a longer one (2min)
+// for mcp-remote servers that may require interactive browser authentication.
 func runAuthenticate(name string, serverDef map[string]any) string {
 	fmt.Printf("\n  Connecting to %s...\n", display.StyleCyan.Render(name))
-	stype, _ := serverDef["type"].(string)
-	if stype == "stdio" {
+
+	timeout := 15 * time.Second
+	if isMcpRemote(serverDef) {
+		timeout = 2 * time.Minute
 		fmt.Println(display.StyleDim.Render("  This may open a browser for authentication."))
 	}
 	fmt.Println()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	result := mcpclient.CheckHealth(ctx, name, serverDef)
