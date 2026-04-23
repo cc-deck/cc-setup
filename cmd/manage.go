@@ -1571,6 +1571,31 @@ func runDeleteSingle(name string) error {
 		display.StyleGreen.Render("Done:"),
 		display.StyleCyan.Render(name),
 		config.GetConfigFile())
+
+	// Also remove from Claude config files so no broken reference remains
+	for _, scope := range []string{"project", "user"} {
+		if existing := config.ReadMcpServers(scope); existing[name] != nil {
+			if _, err := config.WriteMcpServers(scope, nil, []string{name}); err == nil {
+				fmt.Printf("  %s also removed from %s\n",
+					display.StyleDim.Render("Cleanup:"),
+					config.ConfigPath(scope))
+			}
+		}
+	}
+
+	// Remove from disabledMcpjsonServers if present
+	if disabled := config.ReadDisabledMcpServers(); len(disabled) > 0 {
+		var filtered []string
+		for _, d := range disabled {
+			if d != name {
+				filtered = append(filtered, d)
+			}
+		}
+		if len(filtered) < len(disabled) {
+			_ = config.WriteDisabledMcpServers(filtered)
+		}
+	}
+
 	fmt.Println()
 	return nil
 }
