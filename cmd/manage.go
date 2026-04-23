@@ -566,6 +566,12 @@ func newManageModel(servers config.ServerMap, scope string, checked map[string]b
 func (m manageModel) Init() tea.Cmd {
 	cmds := make([]tea.Cmd, 0, len(m.servers))
 	for name, def := range m.servers {
+		// Skip stdio servers: spawning the process can trigger interactive
+		// authentication (e.g. mcp-remote opening a browser for OAuth).
+		// Use the Authenticate action in the detail view instead.
+		if stype, _ := def["type"].(string); stype == "stdio" {
+			continue
+		}
 		name, def := name, def // capture loop vars
 		cmds = append(cmds, func() tea.Msg {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
