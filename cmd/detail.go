@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
@@ -11,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/cc-deck/cc-setup/internal/config"
 	"github.com/cc-deck/cc-setup/internal/display"
+	mcpclient "github.com/cc-deck/cc-setup/internal/mcp"
 )
 
 // detailAction represents the action chosen from the detail view.
@@ -20,6 +23,7 @@ const (
 	detailNone detailAction = iota
 	detailEditField
 	detailToolPermissions
+	detailAuthenticate
 	detailBack
 )
 
@@ -95,7 +99,8 @@ func buildDetailFields(name string, server map[string]any, sourcePath string) []
 	desc, _ := server["description"].(string)
 	fields = append(fields, detailField{label: "Description", value: desc, key: "description"})
 
-	// Tool permissions entry (always last, visually separated)
+	// Action entries (visually separated from data fields)
+	fields = append(fields, detailField{label: "Authenticate", value: "", key: "authenticate"})
 	fields = append(fields, detailField{label: "Tool permissions", value: "", key: "tools"})
 
 	return fields
@@ -149,6 +154,8 @@ func (m detailModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if f.key == "tools" {
 				m.action = detailToolPermissions
+			} else if f.key == "authenticate" {
+				m.action = detailAuthenticate
 			} else {
 				m.action = detailEditField
 				m.selKey = f.key
@@ -195,8 +202,8 @@ func (m detailModel) View() string {
 	labelFocused := lipgloss.NewStyle().Foreground(lipgloss.Color("6")).Bold(true)
 
 	for i, f := range m.fields {
-		// Add visual separator before "Tool permissions"
-		if f.key == "tools" {
+		// Add visual separator before action entries
+		if f.key == "authenticate" {
 			b.WriteString("\n")
 		}
 
@@ -214,8 +221,8 @@ func (m detailModel) View() string {
 			} else {
 				b.WriteString("  " + cursor + labelStyle.Render(label) + "  " + dim.Render(f.value) + "\n")
 			}
-		} else if f.key == "tools" {
-			// Tool permissions entry: show arrow suffix
+		} else if f.key == "tools" || f.key == "authenticate" {
+			// Action entries: show arrow suffix
 			if i == m.cursor {
 				b.WriteString("  " + cyanBold.Render(cursor) + labelFocused.Render(label) + "  " + arrowStyle.Render("\u2192") + "\n")
 			} else {
@@ -285,6 +292,10 @@ func runServerDetail(name string, servers config.ServerMap, scope string, tab ma
 				return err
 			}
 			// Loop back to show updated detail view
+
+		case detailAuthenticate:
+			fmt.Print("\033[2J\033[H")
+			statusMsg = runAuthenticate(name, servers[name])
 
 		case detailToolPermissions:
 			// Clear screen for tools view
@@ -618,6 +629,36 @@ func editEnv(name string, servers config.ServerMap, server map[string]any) error
 
 	servers[name] = server
 	return config.SaveServers(servers)
+}
+
+// runAuthenticate connects to the MCP server and returns a status message.
+// For stdio servers (e.g. mcp-remote) this may open a browser for OAuth.
+func runAuthenticate(name string, serverDef map[string]any) string {
+	fmt.Printf("\n  Connecting to %s...\n", display.StyleCyan.Render(name))
+	stype, _ := serverDef["type"].(string)
+	if stype == "stdio" {
+		fmt.Println(display.StyleDim.Render("  This may open a browser for authentication."))
+	}
+	fmt.Println()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	result := mcpclient.CheckHealth(ctx, name, serverDef)
+	switch result.Status {
+	case mcpclient.HealthOK:
+		return display.StyleGreen.Render("✓") + " connected successfully"
+	case mcpclient.HealthAuthRequired:
+		return display.StyleYellow.Render("!") + " authentication required"
+	case mcpclient.HealthError:
+		msg := "connection failed"
+		if result.Err != nil {
+			msg = result.Err.Error()
+		}
+		return display.StyleRed.Render("✗") + " " + msg
+	default:
+		return ""
+	}
 }
 
 func editDescription(name string, servers config.ServerMap, server map[string]any) error {
