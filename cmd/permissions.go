@@ -1123,12 +1123,13 @@ func runAddMCPTool(scope string) ([]string, error) {
 
 	// Show ALL configured servers (not just scope-enabled) so newly added ones appear
 	serverNames := config.ServerNames(servers)
-	enabledServers := config.ReadMcpServers(scope)
+	inherited := config.ReadInheritedMcpServers()
+	enabledServers := loadCheckedState(servers, scope, inherited)
 
 	var serverOptions []huh.Option[string]
 	for _, name := range serverNames {
 		label := name
-		if _, enabled := enabledServers[name]; !enabled {
+		if !enabledServers[name] {
 			label += " (not enabled)"
 		}
 		serverOptions = append(serverOptions, huh.NewOption(label, name))
