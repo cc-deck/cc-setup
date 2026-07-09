@@ -422,6 +422,55 @@ func WriteAllPermissions(scope string, permissions []string, denied ...[]string)
 	return path, nil
 }
 
+// AcceptTrustDialog sets hasTrustDialogAccepted: true for the current project
+// in ~/.claude.json, preserving all other fields. Without this, Claude Code
+// ignores project-scoped permissions.allow entries on startup.
+func AcceptTrustDialog() error {
+	configPath := ConfigPath("user")
+	projectKey := canonicalCwd()
+	if projectKey == "" {
+		return fmt.Errorf("cannot determine canonical project path")
+	}
+
+	var data map[string]json.RawMessage
+	if content, err := os.ReadFile(configPath); err == nil {
+		if err := json.Unmarshal(content, &data); err != nil {
+			data = make(map[string]json.RawMessage)
+		}
+	} else {
+		data = make(map[string]json.RawMessage)
+	}
+
+	projects := make(map[string]map[string]json.RawMessage)
+	if raw, ok := data["projects"]; ok {
+		_ = json.Unmarshal(raw, &projects)
+	}
+
+	entry := projects[projectKey]
+	if entry == nil {
+		entry = make(map[string]json.RawMessage)
+	}
+	entry["hasTrustDialogAccepted"] = json.RawMessage(`true`)
+	projects[projectKey] = entry
+
+	projectsJSON, err := json.Marshal(projects)
+	if err != nil {
+		return fmt.Errorf("marshalling projects: %w", err)
+	}
+	data["projects"] = projectsJSON
+
+	output, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+	output = append(output, '\n')
+
+	if err := os.WriteFile(configPath, output, 0o644); err != nil {
+		return fmt.Errorf("writing %s: %w", configPath, err)
+	}
+	return nil
+}
+
 // ReadPermissionMode reads the permissions.defaultMode from settings.json
 // for the given scope.
 func ReadPermissionMode(scope string) string {

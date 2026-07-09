@@ -537,7 +537,6 @@ func consolidatePermissions(permissions []string) (cleaned, removed []string) {
 	seen := make(map[string]bool, len(permissions))
 	hasBashWildcard := false
 	hasBareBash := false
-	hasMcpGlobalWildcard := false
 	mcpWildcards := make(map[string]bool) // server names with mcp__server__* wildcard
 
 	// First pass: detect wildcards and bare tool entries
@@ -547,9 +546,6 @@ func consolidatePermissions(permissions []string) (cleaned, removed []string) {
 		}
 		if p == "Bash" {
 			hasBareBash = true
-		}
-		if p == "mcp__*" {
-			hasMcpGlobalWildcard = true
 		}
 		if strings.HasPrefix(p, "mcp__") && strings.HasSuffix(p, "__*") && p != "mcp__*" {
 			parts := strings.SplitN(p, "__", 3)
@@ -580,6 +576,12 @@ func consolidatePermissions(permissions []string) (cleaned, removed []string) {
 			continue
 		}
 
+		// mcp__* is invalid in permissions.allow — only mcp__<server>__* is accepted
+		if p == "mcp__*" {
+			removed = append(removed, p+" (invalid: use mcp__<server>__* instead)")
+			continue
+		}
+
 		// Bare "Bash" subsumes all Bash(pattern) entries
 		if hasBareBash && strings.HasPrefix(p, "Bash(") {
 			removed = append(removed, p+" (subsumed by Bash)")
@@ -592,14 +594,8 @@ func consolidatePermissions(permissions []string) (cleaned, removed []string) {
 			continue
 		}
 
-		// mcp__* global wildcard subsumes all mcp__server__* entries
-		if hasMcpGlobalWildcard && strings.HasPrefix(p, "mcp__") && p != "mcp__*" {
-			removed = append(removed, p+" (subsumed by mcp__*)")
-			continue
-		}
-
 		// mcp__server__* wildcard subsumes specific tools for that server
-		if !hasMcpGlobalWildcard && strings.HasPrefix(p, "mcp__") && !strings.HasSuffix(p, "__*") {
+		if strings.HasPrefix(p, "mcp__") && !strings.HasSuffix(p, "__*") {
 			parts := strings.SplitN(p, "__", 3)
 			if len(parts) >= 2 && mcpWildcards[parts[1]] {
 				removed = append(removed, p+" (subsumed by mcp__"+parts[1]+"__*)")
@@ -648,6 +644,15 @@ func runSavePermissions(states map[string]permState, sources map[string]string, 
 		return fmt.Errorf("failed to write permission mode: %w", err)
 	}
 
+	// For project-scope saves, accept the trust dialog so Claude Code
+	// doesn't ignore the permissions.allow entries on startup.
+	if scope == "project" {
+		if err := config.AcceptTrustDialog(); err != nil {
+			fmt.Printf("  %s failed to accept trust dialog: %v\n",
+				display.StyleYellow.Render("Warning:"), err)
+		}
+	}
+
 	fmt.Println()
 	fmt.Printf("  %s permissions updated (%d entries)\n",
 		display.StyleGreen.Render("Saved:"),
@@ -669,9 +674,70 @@ func runSavePermissions(states map[string]permState, sources map[string]string, 
 	if mode != "" {
 		fmt.Printf("  %s %s\n", display.StyleDim.Render("Permission mode:"), mode)
 	}
+	if scope == "project" {
+		fmt.Printf("  %s workspace trusted in ~/.claude.json\n", display.StyleDim.Render("Trust:"))
+	}
 	fmt.Println()
 
 	return nil
+}
+
+// runFullYolo applies the "Full YOLO" permission profile to project scope
+// without launching the TUI.
+func runFullYolo() error {
+	_ = config.EnsureBuiltinProfiles()
+
+	profiles, err := config.LoadProfiles()
+	if err != nil {
+		return fmt.Errorf("loading profiles: %w", err)
+	}
+
+	var profile *config.Profile
+	for i := range profiles {
+		if profiles[i].Name == "Full YOLO" {
+			profile = &profiles[i]
+			break
+		}
+	}
+	if profile == nil {
+		return fmt.Errorf("Full YOLO profile not found")
+	}
+
+	states := make(map[string]permState)
+	sources := make(map[string]string)
+
+	for _, tool := range allBuiltinTools {
+		states[tool] = permAsk
+	}
+
+	for _, perm := range profile.Permissions.Allow {
+		states[perm] = permAllow
+		sources[perm] = "profile"
+	}
+	for _, pattern := range profile.Permissions.Bash {
+		key := "Bash(" + pattern + ")"
+		states[key] = permAllow
+		sources[key] = "profile"
+	}
+
+	// MCP: add per-server wildcards for all configured servers
+	hasGlobalWildcard := false
+	for _, pattern := range profile.Permissions.MCP.Include {
+		if pattern == "*" {
+			hasGlobalWildcard = true
+			break
+		}
+	}
+	if hasGlobalWildcard {
+		servers, _ := config.LoadServers()
+		for _, serverName := range config.ServerNames(servers) {
+			key := "mcp__" + serverName + "__*"
+			states[key] = permAllow
+			sources[key] = "profile"
+		}
+	}
+
+	return runSavePermissions(states, sources, profile.Mode, "project")
 }
 
 // runModeSelector shows a huh form for selecting the permission mode.
@@ -816,8 +882,7 @@ func applyProfile(m *manageModel, profileName string) error {
 		m.permSources[key] = "profile"
 	}
 
-	// MCP tool handling: if the profile uses a global wildcard include,
-	// just add mcp__* instead of discovering every server's tools individually.
+	// MCP tool handling: check if the profile uses a global wildcard include.
 	hasGlobalWildcard := false
 	for _, pattern := range profile.Permissions.MCP.Include {
 		if pattern == "*" {
@@ -826,14 +891,17 @@ func applyProfile(m *manageModel, profileName string) error {
 		}
 	}
 
-	if hasGlobalWildcard {
-		// Global wildcard: one entry covers all servers and tools
-		m.permStates["mcp__*"] = permAllow
-		m.permSources["mcp__*"] = "profile"
-	} else {
-		// Discover and classify MCP tools from all configured servers
-		servers, _ := config.LoadServers()
-		for _, serverName := range config.ServerNames(servers) {
+	// Discover and process MCP tools from all configured servers
+	servers, _ := config.LoadServers()
+	for _, serverName := range config.ServerNames(servers) {
+		if hasGlobalWildcard {
+			// Global wildcard: add per-server wildcard (mcp__<server>__*)
+			// instead of mcp__* which is invalid in permissions.allow
+			key := "mcp__" + serverName + "__*"
+			m.permStates[key] = permAllow
+			m.permSources[key] = "profile"
+		} else {
+			// Classify each tool against the profile's rules
 			var tools []mcpclient.ToolInfo
 			if cached, ok := toolCache.Load(serverName); ok {
 				tools = cached.([]mcpclient.ToolInfo)
@@ -851,7 +919,6 @@ func applyProfile(m *manageModel, profileName string) error {
 				tools = discovered
 			}
 
-			// Classify each tool against the profile's rules
 			for _, tool := range tools {
 				ct := config.ClassifyTool(tool.Name, tool.ReadOnlyHint, tool.DestructiveHint, tool.HasAnnotations, *profile)
 				key := "mcp__" + serverName + "__" + tool.Name

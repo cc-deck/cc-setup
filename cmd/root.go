@@ -20,6 +20,8 @@ func SetVersionInfo(v, c, d string) {
 	rootCmd.Version = fmt.Sprintf("%s (%s %s)", version, commit, date)
 }
 
+var fullYolo bool
+
 var rootCmd = &cobra.Command{
 	Use:   "cc-setup",
 	Short: "Manage MCP servers and plugins for Claude Code",
@@ -31,6 +33,9 @@ Claude's context clean by loading only the tools you actually need.
 Central server config: ~/.config/cc-setup/mcp.json (or $XDG_CONFIG_HOME/cc-setup/mcp.json)`,
 	// Default: interactive management hub
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if fullYolo {
+			return runFullYolo()
+		}
 		return runManage()
 	},
 	SilenceUsage:  true,
@@ -38,6 +43,7 @@ Central server config: ~/.config/cc-setup/mcp.json (or $XDG_CONFIG_HOME/cc-setup
 }
 
 func init() {
+	rootCmd.Flags().BoolVar(&fullYolo, "full-yolo", false, "Install Full YOLO permission profile and exit (no TUI)")
 	rootCmd.SetVersionTemplate("cc-setup {{ .Version }}\n")
 	rootCmd.AddCommand(addCmd)
 	rootCmd.AddCommand(removeCmd)
