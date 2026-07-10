@@ -31,4 +31,5 @@ Go 1.25.0: Follow standard conventions
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
+at specs/002-permissions-subcommand/plan.md
 <!-- SPECKIT END -->

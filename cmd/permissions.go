@@ -16,7 +16,311 @@ import (
 	"github.com/cc-deck/cc-setup/internal/config"
 	"github.com/cc-deck/cc-setup/internal/display"
 	mcpclient "github.com/cc-deck/cc-setup/internal/mcp"
+	"github.com/spf13/cobra"
 )
+
+// permCmd is the parent command for permission management subcommands.
+// Running it bare (no subcommand) opens the TUI on the Permissions tab.
+var permCmd = &cobra.Command{
+	Use:     "permissions",
+	Aliases: []string{"perm"},
+	Short:   "Manage Claude Code permissions",
+	Long: `Manage Claude Code permission profiles, view current state, or reset permissions.
+
+Running without a subcommand opens the TUI on the Permissions tab.
+Use subcommands (apply, show, reset) for headless operation.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return runManageWithTab(tabPermissions)
+	},
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		scope, _ := cmd.Flags().GetString("scope")
+		if scope != "project" && scope != "user" {
+			err := fmt.Errorf("invalid scope %q: must be \"project\" or \"user\"", scope)
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+			return err
+		}
+		return nil
+	},
+}
+
+// listAvailableProfiles returns a formatted string listing available profiles.
+func listAvailableProfiles() string {
+	_ = config.EnsureBuiltinProfiles()
+	profiles, _ := config.LoadProfiles()
+
+	var available []string
+	for slug, pname := range profileSlugs {
+		available = append(available, fmt.Sprintf("  %-10s %s", slug, pname))
+	}
+	sort.Strings(available)
+	for _, p := range profiles {
+		isBuiltin := false
+		for _, pname := range profileSlugs {
+			if p.Name == pname {
+				isBuiltin = true
+				break
+			}
+		}
+		if !isBuiltin {
+			available = append(available, fmt.Sprintf("  %-10s %s", "\""+p.Name+"\"", p.Description))
+		}
+	}
+	return strings.Join(available, "\n")
+}
+
+// permApplyCmd applies a named profile headlessly.
+var permApplyCmd = &cobra.Command{
+	Use:   "apply <profile>",
+	Short: "Apply a permission profile",
+	Long: `Apply a named permission profile to the target scope.
+
+Built-in profile slugs (case-insensitive):
+  yolo       Full YOLO (bypass all permission checks)
+  readonly   Read-only YOLO (auto-approve edits, read-only MCP tools)
+
+Custom profiles are matched by exact name.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: no profile specified\n\nUsage: cc-setup perm apply <profile>\n\nAvailable profiles:\n%s\n", listAvailableProfiles())
+			return fmt.Errorf("no profile specified")
+		}
+		if len(args) > 1 {
+			return fmt.Errorf("expected exactly 1 argument, got %d", len(args))
+		}
+
+		scope, _ := cmd.Flags().GetString("scope")
+
+		profile, err := resolveProfile(args[0])
+		if err != nil {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %v\n", err)
+			return err
+		}
+
+		states, sources := buildProfileState(profile)
+
+		fmt.Printf("  Applying profile: %s\n", profile.Name)
+		fmt.Printf("  Scope: %s\n", scope)
+		fmt.Println()
+
+		return runSavePermissions(states, sources, profile.Mode, scope)
+	},
+}
+
+// permShowCmd displays the current permission state for a scope.
+var permShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Show current permission state",
+	Long:  `Display the current permission mode, allowed tools, denied tools, and file paths for the target scope.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		scope, _ := cmd.Flags().GetString("scope")
+
+		permissions := config.ReadAllPermissions(scope)
+		denied := config.ReadDenyPermissions(scope)
+		mode := config.ReadPermissionMode(scope)
+
+		settingsPath := config.SettingsPath(scope)
+		modePath := config.PluginSettingsPath(scope)
+
+		scopeLabel := "project"
+		if scope == "user" {
+			scopeLabel = "user (global)"
+		}
+
+		// Display mode
+		if mode == "" {
+			mode = "default"
+		}
+		fmt.Println()
+		fmt.Printf("  Permission Mode: %s\n", mode)
+		fmt.Printf("  Scope: %s\n", scopeLabel)
+		fmt.Println()
+
+		// Group allowed permissions by category
+		var builtinAllow, bashAllow, mcpAllow []string
+		for _, perm := range permissions {
+			cat, _ := categorizePermission(perm)
+			switch cat {
+			case "builtin":
+				builtinAllow = append(builtinAllow, perm)
+			case "bash":
+				bashAllow = append(bashAllow, perm)
+			case "mcp":
+				mcpAllow = append(mcpAllow, perm)
+			}
+		}
+		sort.Strings(builtinAllow)
+		sort.Strings(bashAllow)
+		sort.Strings(mcpAllow)
+
+		fmt.Printf("  Allowed (%d entries):\n", len(permissions))
+		if len(permissions) == 0 {
+			fmt.Println("    (none)")
+		} else {
+			if len(builtinAllow) > 0 {
+				fmt.Println("    Built-in:")
+				fmt.Printf("      %s\n", strings.Join(builtinAllow, ", "))
+			}
+			if len(bashAllow) > 0 {
+				fmt.Println("    Bash patterns:")
+				for _, p := range bashAllow {
+					fmt.Printf("      %s\n", p)
+				}
+			}
+			if len(mcpAllow) > 0 {
+				fmt.Println("    MCP:")
+				for _, p := range mcpAllow {
+					fmt.Printf("      %s\n", p)
+				}
+			}
+		}
+		fmt.Println()
+
+		// Display denied permissions
+		fmt.Printf("  Denied (%d entries):\n", len(denied))
+		if len(denied) == 0 {
+			fmt.Println("    (none)")
+		} else {
+			for _, d := range denied {
+				fmt.Printf("    %s\n", d)
+			}
+		}
+		fmt.Println()
+
+		// Display file paths
+		fmt.Println("  Files:")
+		fmt.Printf("    Permissions: %s\n", settingsPath)
+		fmt.Printf("    Mode: %s\n", modePath)
+		fmt.Println()
+
+		return nil
+	},
+}
+
+// permResetCmd clears all permission configuration for a scope.
+var permResetCmd = &cobra.Command{
+	Use:   "reset",
+	Short: "Reset permissions to defaults",
+	Long:  `Clear all configured permissions and mode for the target scope. Other settings (plugins, MCP servers) are preserved.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		scope, _ := cmd.Flags().GetString("scope")
+
+		// Check if there's anything to reset
+		permissions := config.ReadAllPermissions(scope)
+		denied := config.ReadDenyPermissions(scope)
+		mode := config.ReadPermissionMode(scope)
+
+		if len(permissions) == 0 && len(denied) == 0 && mode == "" {
+			fmt.Println()
+			fmt.Println("  Nothing to reset: no permissions configured.")
+			fmt.Println()
+			return nil
+		}
+
+		// Clear permissions
+		path, err := config.WriteAllPermissions(scope, []string{}, []string{})
+		if err != nil {
+			return fmt.Errorf("failed to clear permissions: %w", err)
+		}
+
+		modePath, err := config.WritePermissionMode(scope, "")
+		if err != nil {
+			return fmt.Errorf("failed to clear permission mode: %w", err)
+		}
+
+		scopeLabel := "project"
+		if scope == "user" {
+			scopeLabel = "user (global)"
+		}
+
+		fmt.Println()
+		fmt.Printf("  %s permissions cleared for %s scope\n",
+			display.StyleGreen.Render("Reset:"), scopeLabel)
+		if len(permissions) > 0 {
+			fmt.Printf("  Cleared %d allowed entries\n", len(permissions))
+		}
+		if len(denied) > 0 {
+			fmt.Printf("  Cleared %d denied entries\n", len(denied))
+		}
+		if mode != "" {
+			fmt.Printf("  Cleared mode: %s\n", mode)
+		}
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Permissions:"), path)
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Mode:"), modePath)
+		fmt.Println()
+
+		return nil
+	},
+}
+
+func init() {
+	permCmd.PersistentFlags().String("scope", "project", "target scope: \"project\" or \"user\"")
+	permCmd.AddCommand(permApplyCmd)
+	permCmd.AddCommand(permShowCmd)
+	permCmd.AddCommand(permResetCmd)
+}
+
+// profileSlugs maps short case-insensitive aliases to built-in profile names.
+var profileSlugs = map[string]string{
+	"yolo":     "Full YOLO",
+	"readonly": "Read-only YOLO",
+}
+
+// resolveProfile resolves a profile name from a slug or exact name.
+// It ensures built-in profiles exist, checks the slug map (case-insensitively),
+// then falls back to exact name match. Returns an error listing available
+// profiles if no match is found.
+func resolveProfile(name string) (*config.Profile, error) {
+	if err := config.EnsureBuiltinProfiles(); err != nil {
+		return nil, fmt.Errorf("ensuring built-in profiles: %w", err)
+	}
+
+	// Check slug map (case-insensitive)
+	targetName := ""
+	for slug, profileName := range profileSlugs {
+		if strings.EqualFold(slug, name) {
+			targetName = profileName
+			break
+		}
+	}
+
+	profiles, err := config.LoadProfiles()
+	if err != nil {
+		return nil, fmt.Errorf("loading profiles: %w", err)
+	}
+
+	// If no slug match, use the name as-is for exact match
+	if targetName == "" {
+		targetName = name
+	}
+
+	for i := range profiles {
+		if profiles[i].Name == targetName {
+			return &profiles[i], nil
+		}
+	}
+
+	// No match: list available profiles
+	var available []string
+	for slug, pname := range profileSlugs {
+		available = append(available, fmt.Sprintf("  %s (%s)", slug, pname))
+	}
+	sort.Strings(available)
+	for _, p := range profiles {
+		// Skip built-in profiles already shown as slugs
+		isBuiltin := false
+		for _, pname := range profileSlugs {
+			if p.Name == pname {
+				isBuiltin = true
+				break
+			}
+		}
+		if !isBuiltin {
+			available = append(available, fmt.Sprintf("  \"%s\"", p.Name))
+		}
+	}
+
+	return nil, fmt.Errorf("unknown profile %q\n\nAvailable profiles:\n%s", name, strings.Join(available, "\n"))
+}
 
 // permState represents the three possible states of a permission.
 type permState int
@@ -682,27 +986,11 @@ func runSavePermissions(states map[string]permState, sources map[string]string, 
 	return nil
 }
 
-// runFullYolo applies the "Full YOLO" permission profile to project scope
-// without launching the TUI.
-func runFullYolo() error {
-	_ = config.EnsureBuiltinProfiles()
-
-	profiles, err := config.LoadProfiles()
-	if err != nil {
-		return fmt.Errorf("loading profiles: %w", err)
-	}
-
-	var profile *config.Profile
-	for i := range profiles {
-		if profiles[i].Name == "Full YOLO" {
-			profile = &profiles[i]
-			break
-		}
-	}
-	if profile == nil {
-		return fmt.Errorf("Full YOLO profile not found")
-	}
-
+// buildProfileState builds the permission state maps from a profile.
+// It initializes all built-in tools as permAsk, then applies the profile's
+// allow entries, bash patterns, and MCP wildcards. Returns the states and
+// sources maps ready for runSavePermissions.
+func buildProfileState(profile *config.Profile) (map[string]permState, map[string]string) {
 	states := make(map[string]permState)
 	sources := make(map[string]string)
 
@@ -737,7 +1025,7 @@ func runFullYolo() error {
 		}
 	}
 
-	return runSavePermissions(states, sources, profile.Mode, "project")
+	return states, sources
 }
 
 // runModeSelector shows a huh form for selecting the permission mode.

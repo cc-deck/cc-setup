@@ -1114,8 +1114,13 @@ func runSave(servers config.ServerMap, checked map[string]bool, scope string, in
 // runManage is the outer loop that alternates between the BubbleTea screen and action handlers.
 // Scope and tab persist across iterations so the user stays in their chosen state.
 func runManage() error {
+	return runManageWithTab(tabServers)
+}
+
+// runManageWithTab is like runManage but starts with the given tab active.
+func runManageWithTab(startTab manageTab) error {
 	scope := "project"
-	tab := tabServers
+	tab := startTab
 	permModeOverride := "" // persists permission mode across TUI re-entries
 	permModeSet := false
 
