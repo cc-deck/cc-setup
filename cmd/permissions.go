@@ -24,7 +24,7 @@ import (
 var permCmd = &cobra.Command{
 	Use:     "permissions",
 	Aliases: []string{"perm"},
-	Short:   "Manage Claude Code permissions",
+	Short:   "Manage Claude Code permissions (alias: perm)",
 	Long: `Manage Claude Code permission profiles, view current state, or reset permissions.
 
 Running without a subcommand opens the TUI on the Permissions tab.
@@ -135,8 +135,11 @@ var permShowCmd = &cobra.Command{
 			mode = "default"
 		}
 		fmt.Println()
-		fmt.Printf("  Permission Mode: %s\n", mode)
-		fmt.Printf("  Scope: %s\n", scopeLabel)
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Permission mode:"), mode)
+		if mode == "bypassPermissions" {
+			fmt.Printf("  %s\n", display.StyleDim.Render("All permission checks bypassed (allow/deny lists inactive)"))
+		}
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Scope:"), scopeLabel)
 		fmt.Println()
 
 		// Group allowed permissions by category
@@ -156,22 +159,23 @@ var permShowCmd = &cobra.Command{
 		sort.Strings(bashAllow)
 		sort.Strings(mcpAllow)
 
-		fmt.Printf("  Allowed (%d entries):\n", len(permissions))
+		fmt.Printf("  %s (%d entries):\n",
+			display.StyleGreen.Render("Allowed"), len(permissions))
 		if len(permissions) == 0 {
 			fmt.Println("    (none)")
 		} else {
 			if len(builtinAllow) > 0 {
-				fmt.Println("    Built-in:")
+				fmt.Printf("    %s\n", display.StyleCyan.Render("Built-in:"))
 				fmt.Printf("      %s\n", strings.Join(builtinAllow, ", "))
 			}
 			if len(bashAllow) > 0 {
-				fmt.Println("    Bash patterns:")
+				fmt.Printf("    %s\n", display.StyleCyan.Render("Bash patterns:"))
 				for _, p := range bashAllow {
 					fmt.Printf("      %s\n", p)
 				}
 			}
 			if len(mcpAllow) > 0 {
-				fmt.Println("    MCP:")
+				fmt.Printf("    %s\n", display.StyleCyan.Render("MCP:"))
 				for _, p := range mcpAllow {
 					fmt.Printf("      %s\n", p)
 				}
@@ -180,7 +184,8 @@ var permShowCmd = &cobra.Command{
 		fmt.Println()
 
 		// Display denied permissions
-		fmt.Printf("  Denied (%d entries):\n", len(denied))
+		fmt.Printf("  %s (%d entries):\n",
+			display.StyleYellow.Render("Denied"), len(denied))
 		if len(denied) == 0 {
 			fmt.Println("    (none)")
 		} else {
@@ -191,9 +196,8 @@ var permShowCmd = &cobra.Command{
 		fmt.Println()
 
 		// Display file paths
-		fmt.Println("  Files:")
-		fmt.Printf("    Permissions: %s\n", settingsPath)
-		fmt.Printf("    Mode: %s\n", modePath)
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Permissions:"), settingsPath)
+		fmt.Printf("  %s %s\n", display.StyleDim.Render("Settings:"), modePath)
 		fmt.Println()
 
 		return nil
