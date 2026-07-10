@@ -30,7 +30,8 @@ var permCmd = &cobra.Command{
 Running without a subcommand opens the TUI on the Permissions tab.
 Use subcommands (apply, show, reset) for headless operation.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runManageWithTab(tabPermissions)
+		scope, _ := cmd.Flags().GetString("scope")
+		return runManageWithTab(tabPermissions, scope)
 	},
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		scope, _ := cmd.Flags().GetString("scope")
@@ -96,7 +97,10 @@ Custom profiles are matched by exact name.`,
 			return err
 		}
 
-		states, sources := buildProfileState(profile)
+		states, sources, err := buildProfileState(profile)
+		if err != nil {
+			return fmt.Errorf("building profile state: %w", err)
+		}
 
 		fmt.Printf("  Applying profile: %s\n", profile.Name)
 		fmt.Printf("  Scope: %s\n", scope)
@@ -299,27 +303,7 @@ func resolveProfile(name string) (*config.Profile, error) {
 		}
 	}
 
-	// No match: list available profiles
-	var available []string
-	for slug, pname := range profileSlugs {
-		available = append(available, fmt.Sprintf("  %s (%s)", slug, pname))
-	}
-	sort.Strings(available)
-	for _, p := range profiles {
-		// Skip built-in profiles already shown as slugs
-		isBuiltin := false
-		for _, pname := range profileSlugs {
-			if p.Name == pname {
-				isBuiltin = true
-				break
-			}
-		}
-		if !isBuiltin {
-			available = append(available, fmt.Sprintf("  \"%s\"", p.Name))
-		}
-	}
-
-	return nil, fmt.Errorf("unknown profile %q\n\nAvailable profiles:\n%s", name, strings.Join(available, "\n"))
+	return nil, fmt.Errorf("unknown profile %q\n\nAvailable profiles:\n%s", name, listAvailableProfiles())
 }
 
 // permState represents the three possible states of a permission.
@@ -579,10 +563,7 @@ func buildPermissionItems(scope string) ([]list.Item, map[string]permState, map[
 	var builtinItems, bashItems []permissionItem
 	mcpItems := make(map[string][]permissionItem)
 
-	for perm, state := range states {
-		// Skip built-in tools in "ask" state without a source (they'll be added separately)
-		// Actually, include all - built-in tools should always show
-		_ = state
+	for perm := range states {
 		cat, server := categorizePermission(perm)
 		item := permissionItem{
 			key:        perm,
@@ -990,7 +971,7 @@ func runSavePermissions(states map[string]permState, sources map[string]string, 
 // It initializes all built-in tools as permAsk, then applies the profile's
 // allow entries, bash patterns, and MCP wildcards. Returns the states and
 // sources maps ready for runSavePermissions.
-func buildProfileState(profile *config.Profile) (map[string]permState, map[string]string) {
+func buildProfileState(profile *config.Profile) (map[string]permState, map[string]string, error) {
 	states := make(map[string]permState)
 	sources := make(map[string]string)
 
@@ -1017,7 +998,10 @@ func buildProfileState(profile *config.Profile) (map[string]permState, map[strin
 		}
 	}
 	if hasGlobalWildcard {
-		servers, _ := config.LoadServers()
+		servers, err := config.LoadServers()
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading servers for MCP wildcard expansion: %w", err)
+		}
 		for _, serverName := range config.ServerNames(servers) {
 			key := "mcp__" + serverName + "__*"
 			states[key] = permAllow
@@ -1025,7 +1009,7 @@ func buildProfileState(profile *config.Profile) (map[string]permState, map[strin
 		}
 	}
 
-	return states, sources
+	return states, sources, nil
 }
 
 // runModeSelector shows a huh form for selecting the permission mode.

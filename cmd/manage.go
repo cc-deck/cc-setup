@@ -1117,9 +1117,12 @@ func runManage() error {
 	return runManageWithTab(tabServers)
 }
 
-// runManageWithTab is like runManage but starts with the given tab active.
-func runManageWithTab(startTab manageTab) error {
+// runManageWithTab is like runManage but starts with the given tab and scope active.
+func runManageWithTab(startTab manageTab, startScope ...string) error {
 	scope := "project"
+	if len(startScope) > 0 && startScope[0] != "" {
+		scope = startScope[0]
+	}
 	tab := startTab
 	permModeOverride := "" // persists permission mode across TUI re-entries
 	permModeSet := false
